@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <!-- Champ de saisie du message du POI -->
+    <EditText
+        android:id="@+id/editPoiMessage"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:hint="Message du POI"
+    android:inputType="textMultiLine"
+    android:minLines="3"
+    android:gravity="top|start"
+    android:padding="8dp"
+    android:background="@android:drawable/edit_text"
+    android:layout_marginBottom="12dp"/>
+
+    <!-- Case à cocher pour approuver le POI -->
+    <CheckBox
+        android:id="@+id/checkApproved"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:text="Approuver le POI"/>
+
+</LinearLayout>
+

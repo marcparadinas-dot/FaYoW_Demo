@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "532310816781",
+    "project_id": "fayow-demo",
+    "storage_bucket": "fayow-demo.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:532310816781:android:9df8e8ec636183c5f27d44",
+        "android_client_info": {
+          "package_name": "com.example.fayowdemo"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAahf0-5ClcJV3sUcWRQoYkEEnSWREnGz0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

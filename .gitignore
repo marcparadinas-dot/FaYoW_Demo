@@ -1,0 +1,22 @@
+# Android Studio
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+build/
+.gradle/
+local.properties
+.DS_Store
+
+# Fichiers de build
+/app/build/
+/*.apk
+/*.aab
+
+# Fichiers de dépendances
+/.gradle/
+/build/
+
+# Fichiers de configuration locale
+/local.properties
