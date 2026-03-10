@@ -47,6 +47,17 @@ android {
 }
 
 dependencies {
+
+        // Bibliothèque de base
+        implementation("com.mikepenz:iconics-core:5.3.3")
+
+        // Exemple : Pack Material Design
+        implementation("com.mikepenz:google-material-typeface:4.0.0.2-kotlin@aar")
+
+        // Exemple : Pack Font Awesome
+        implementation("com.mikepenz:fontawesome-typeface:5.9.0.2-kotlin@aar")
+
+
     implementation("com.google.android.gms:play-services-location:21.0.1") // Pour la localisation
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")

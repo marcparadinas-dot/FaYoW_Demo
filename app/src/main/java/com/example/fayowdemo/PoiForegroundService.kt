@@ -1,9 +1,13 @@
 package com.example.fayowdemo
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.os.Build
 import android.os.IBinder
 import android.speech.tts.TextToSpeech
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import java.util.*
 
 class PoiForegroundService : Service(), TextToSpeech.OnInitListener {  // ← Ajout de l'interface ici
@@ -36,8 +40,33 @@ class PoiForegroundService : Service(), TextToSpeech.OnInitListener {  // ← Aj
     }
 
     private fun startAsForeground() {
-        // ... (ton code pour la notification)
+        val channelId = "pois_channel"
+
+        // Créer un canal de notification (obligatoire pour Android 8+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId,
+                "Diffusion des POIs",
+                NotificationManager.IMPORTANCE_LOW  // Notification discrète
+            )
+            val manager = getSystemService(NotificationManager::class.java)
+            manager?.createNotificationChannel(channel)
+        }
+
+        // Créer la notification
+        val notification = NotificationCompat.Builder(this, channelId)
+            .setContentTitle("POIs actifs")
+            .setContentText("Diffusion des POIs en cours...")
+            .setSmallIcon(android.R.drawable.ic_dialog_info)  // Remplace par ton icône
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)  // L'utilisateur ne peut pas la fermer
+            .build()
+
+        // Démarrer le service en foreground
+        startForeground(1, notification)
+        Log.d("SERVICE", "Service démarré en foreground")
     }
+
 
     override fun onDestroy() {
         textToSpeech.stop()
