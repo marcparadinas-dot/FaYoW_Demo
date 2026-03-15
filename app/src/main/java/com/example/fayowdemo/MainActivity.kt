@@ -75,7 +75,9 @@ interface AuthActions {
 data class PointInteret(
     val id: String,
     val position: LatLng,
-    val message: String
+    val message: String,
+    val status: PoiStatus = PoiStatus.VALIDATED,  // ✅ Ajout du champ status
+    val creatorUid: String? = null
 )
 
 // POI en attente de modération
@@ -83,6 +85,22 @@ data class PendingPoi(
     val id: String,
     val message: String
 )
+enum class PoiStatus {
+    INITIATED,   // Brouillon personnel
+    PROPOSED,    // Proposé à la modération
+    VALIDATED    // Validé par modérateur
+}
+
+// Fonction utilitaire pour convertir les champs Firestore en statut
+fun poiStatusFromFirestore(approved: Boolean?, status: String?): PoiStatus {
+    return when (status) {
+        "initiated" -> PoiStatus.INITIATED
+        "proposed" -> PoiStatus.PROPOSED
+        "validated" -> PoiStatus.VALIDATED
+        else -> if (approved == true) PoiStatus.VALIDATED else PoiStatus.PROPOSED
+    }
+}
+
 
 @RequiresApi(Build.VERSION_CODES.CUPCAKE)
 class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListener {
@@ -119,10 +137,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             }
         }
     }
-
-
-
-
 
     private fun showPermissionSettingsDialog() {
         AlertDialog.Builder(this)
@@ -184,52 +198,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         // Démarrer le service de localisation (il gérera lui-même les restrictions BACKGROUND)
         startLocationService()
     }
-
-/*
-    private fun checkAndRequestPermissions() {
-        val fineLocationStatus = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-        val backgroundLocationStatus = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-
-        when {
-            // Cas 1: Toutes les permissions sont déjà accordées (et on est authentifié)
-            fineLocationStatus == PackageManager.PERMISSION_GRANTED &&
-                    backgroundLocationStatus == PackageManager.PERMISSION_GRANTED -> {
-                Log.d("MainActivity", "🟢 Toutes les permissions déjà accordées, démarre les services.")
-                if (isAuthenticated) { // Assurez-vous que l'authentification est OK ici
-                    // Initialize map and start services if not already running
-                    if (!::mMap.isInitialized) initializeMapView() // Initialiser la carte si pas déjà fait
-                    startLocationUpdates()
-                    startLocationService()
-                } else {
-                    Log.d("MainActivity", "🟢 Permissions OK, mais pas encore authentifié.")
-                    // Vous pouvez attendre l'authentification pour démarrer les services
-                }
-            }
-            // Cas 2: Permission FINE refusée définitivement
-            fineLocationStatus == PackageManager.PERMISSION_DENIED &&
-                    !shouldShowRequestPermissionRationale(Manifest.permission.ACCESS_FINE_LOCATION) -> {
-                Log.w("MainActivity", "⚠️ Permission FINE refusée définitivement, affiche le dialogue.")
-                showPermissionSettingsDialog()
-            }
-            // Cas 3: Permission FINE non accordée (ni refusée définitivement) → demander
-            fineLocationStatus != PackageManager.PERMISSION_GRANTED -> {
-                Log.d("MainActivity", "📲 Demande la permission FINE (non accordée).")
-                requestFineLocationPermission()
-            }
-            // Cas 4: Permission FINE accordée, mais BACKGROUND non accordée → demander BACKGROUND
-            fineLocationStatus == PackageManager.PERMISSION_GRANTED &&
-                    backgroundLocationStatus != PackageManager.PERMISSION_GRANTED -> {
-                Log.d("MainActivity", "📲 Permission FINE OK, demande la permission BACKGROUND.")
-                requestBackgroundLocationPermission()
-            }
-            // Cas par défaut (ne devrait pas arriver si les cas sont bien couverts)
-            else -> {
-                Log.w("MainActivity", "❓ État de permission inattendu. Fine: $fineLocationStatus, Background: $backgroundLocationStatus")
-            }
-        }
-    }
-*/
-
     private fun hasAllLocationPermissions(): Boolean {
         val fineLocationGranted = ContextCompat.checkSelfPermission(
             this,
@@ -243,8 +211,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
         return fineLocationGranted && backgroundLocationGranted
     }
-
-
     private var isTtsReady = false
     private var isModerator: Boolean = false
     private lateinit var mMap: GoogleMap
@@ -283,11 +249,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         super.onDestroy()
         stopLocationService()
     }
-
+/*
     private fun ajouterPoisDeTest() {
         val firestore =
             FirebaseFirestore.getInstance() // Pour ajout de points en masse, utiliser ce format et réactiver le "ajouter points de tests" dans oncreate
-
 
         val poisATester = listOf(
             // Rue de Lappe
@@ -303,145 +268,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 "lat" to 48.8538500,
                 "lng" to 2.3725000,
                 "message" to "Observez l'architecture des immeubles du début du XXe siècle, souvent avec des façades en pierre de taille et des ornements discrets, témoins de l'évolution urbaine du quartier.",
-                "approved" to true,
-                "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
-                "createdAt" to com.google.firebase.Timestamp.now()
-            ),
-            mapOf(
-                "lat" to 48.8537500,
-                "lng" to 2.3727000,
-                "message" to "Portez attention aux détails des ferronneries des balcons, souvent uniques à chaque immeuble, reflétant l'artisanat de l'époque.",
-                "approved" to true,
-                "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
-                "createdAt" to com.google.firebase.Timestamp.now()
-            ),
-            mapOf(
-                "lat" to 48.8536500,
-                "lng" to 2.3729000,
-                "message" to "La rue se resserre légèrement : les pavés et l’étroitesse de la voie rappellent son passé d’artère animée par les artisans et les ouvriers du faubourg.",
-                "approved" to true,
-                "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
-                "createdAt" to com.google.firebase.Timestamp.now()
-            ),
-            mapOf(
-                "lat" to 48.8535500,
-                "lng" to 2.3731000,
-                "message" to "Regardez les porches et portes cochères : derrière se trouvent souvent d’anciens ateliers ou cours intérieures, typiques de la structure en “arrière-cours” des immeubles parisiens.",
-                "approved" to true,
-                "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
-                "createdAt" to com.google.firebase.Timestamp.now()
-            ),
-            mapOf(
-                "lat" to 48.8534500,
-                "lng" to 2.3733000,
-                "message" to "Remarquez la variété des matériaux de construction, du crépi à la brique, qui témoigne des différentes périodes de rénovation et de construction de la rue.",
-                "approved" to true,
-                "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
-                "createdAt" to com.google.firebase.Timestamp.now()
-            ),
-            mapOf(
-                "lat" to 48.8533664,
-                "lng" to 2.3734673,
-                "message" to "Cette partie de la rue est historiquement connue pour ses salles de bal et son ambiance festive populaire ; elle illustre la vie nocturne et sociale des quartiers ouvriers parisiens du XXe siècle.",
-                "approved" to true,
-                "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
-                "createdAt" to com.google.firebase.Timestamp.now()
-            ),
-            mapOf(
-                "lat" to 48.8532500,
-                "lng" to 2.3736500,
-                "message" to "Les petites niches ou encadrements au-dessus de certaines portes peuvent parfois révéler d'anciens numéros de rue ou des marques d'artisans disparus.",
-                "approved" to true,
-                "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
-                "createdAt" to com.google.firebase.Timestamp.now()
-            ),
-            mapOf(
-                "lat" to 48.8531500,
-                "lng" to 2.3738500,
-                "message" to "La lumière particulière qui filtre entre les immeubles hauts crée une atmosphère singulière, caractéristique des vieilles rues parisiennes.",
-                "approved" to true,
-                "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
-                "createdAt" to com.google.firebase.Timestamp.now()
-            ),
-            mapOf(
-                "lat" to 48.8530864,
-                "lng" to 2.3740242,
-                "message" to "Vous êtes vers l’extrémité est : le contraste entre cette petite rue et les artères plus larges voisines montre bien la transition entre tissu ancien du faubourg et aménagements plus récents.",
-                "approved" to true,
-                "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
-                "createdAt" to com.google.firebase.Timestamp.now()
-            ),
-
-
-            // Rue des Taillandiers (coordonnées corrigées)
-            mapOf(
-                "lat" to 48.8533000,
-                "lng" to 2.3757000,
-                "message" to "À l'extrémité ouest de la rue des Taillandiers, observez son début près de la rue de Lappe, avec des immeubles aux façades étroites et des traces d'anciens ateliers.",
-                "approved" to true,
-                "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
-                "createdAt" to com.google.firebase.Timestamp.now()
-            ),
-            mapOf(
-                "lat" to 48.8536000,
-                "lng" to 2.3755000,
-                "message" to "Les balcons en fer forgé et les fenêtres alignées illustrent l'architecture typique du XIXe siècle, avec des détails artisanaux encore visibles.",
-                "approved" to true,
-                "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
-                "createdAt" to com.google.firebase.Timestamp.now()
-            ),
-            mapOf(
-                "lat" to 48.8539000,
-                "lng" to 2.3753000,
-                "message" to "Remarquez les portes cochères, souvent surmontées d'arcades, qui donnaient accès à des cours intérieures où s'organisait la vie des artisans.",
-                "approved" to true,
-                "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
-                "createdAt" to com.google.firebase.Timestamp.now()
-            ),
-            mapOf(
-                "lat" to 48.8542000,
-                "lng" to 2.3751000,
-                "message" to "Les pavés et le tracé sinueux de la rue rappellent son histoire médiévale, avant les grands travaux haussmanniens du XIXe siècle.",
-                "approved" to true,
-                "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
-                "createdAt" to com.google.firebase.Timestamp.now()
-            ),
-            mapOf(
-                "lat" to 48.8545000,
-                "lng" to 2.3749000,
-                "message" to "Les façades en pierre de taille ou en brique reflètent les différentes époques de construction, avec des rénovations plus récentes sur certains immeubles.",
-                "approved" to true,
-                "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
-                "createdAt" to com.google.firebase.Timestamp.now()
-            ),
-            mapOf(
-                "lat" to 48.8548000,
-                "lng" to 2.3747000,
-                "message" to "La rue s'élargit légèrement ici, avec des immeubles plus hauts qui marquent la transition vers des quartiers plus modernes.",
-                "approved" to true,
-                "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
-                "createdAt" to com.google.firebase.Timestamp.now()
-            ),
-            mapOf(
-                "lat" to 48.8551000,
-                "lng" to 2.3745000,
-                "message" to "Les détails architecturaux, comme les corniches ou les sculptures, témoignent du savoir-faire des artisans qui ont travaillé dans ce quartier.",
-                "approved" to true,
-                "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
-                "createdAt" to com.google.firebase.Timestamp.now()
-            ),
-            mapOf(
-                "lat" to 48.8554000,
-                "lng" to 2.3743000,
-                "message" to "Vers l'extrémité est, la rue des Taillandiers s'ouvre sur un environnement plus large, marquant la limite avec d'autres quartiers du 11e arrondissement.",
-                "approved" to true,
-                "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
-                "createdAt" to com.google.firebase.Timestamp.now()
-            ),
-            mapOf(
-                "lat" to 48.8555000,
-                "lng" to 2.3746000,
-                "message" to "Cette partie de la rue offre une vue sur des immeubles plus récents, contrastant avec le caractère historique du début de la rue.",
                 "approved" to true,
                 "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
                 "createdAt" to com.google.firebase.Timestamp.now()
@@ -473,6 +299,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             Thread.sleep(10)  // Pause de 10ms entre chaque création
         }
     }
+*/
     // ✅ Fonction pour vérifier si ACCESS_FINE_LOCATION est accordée
     private fun hasFineLocationPermission(): Boolean {
         return ContextCompat.checkSelfPermission(
@@ -522,7 +349,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             fineLocationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
         }
     }
-
 
     // ✅ Fonction pour demander ACCESS_BACKGROUND_LOCATION
     private fun requestBackgroundLocationPermission() {
@@ -602,7 +428,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         stopService(serviceIntent)
     }
 
-
     private fun chargerPoisDeclenches() {
         val prefs = getSharedPreferences("FayowPrefs", Context.MODE_PRIVATE)
         val savedSet = prefs.getStringSet("pois_declenches", emptySet()) ?: emptySet()
@@ -676,7 +501,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             android.util.Log.e("LOCATION", "❌ Erreur de permission pour la mise à jour GPS : ${e.message}")
         }
     }
-
 
     @RequiresApi(Build.VERSION_CODES.CUPCAKE)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -776,7 +600,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         // 6. Charger les POIs déjà déclenchés
         chargerPoisDeclenches()
 
-// 7. Vérifie si l'utilisateur est déjà connecté et gère l'UI en conséquence
+        // 7. Vérifie si l'utilisateur est déjà connecté et gère l'UI en conséquence
         val currentUser = auth.currentUser
         if (currentUser != null) {
             Log.d("AUTH", "Utilisateur déjà connecté: ${currentUser.email}")
@@ -814,28 +638,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 }
             }
         }
-
-
-// 8. Gestion des permissions de localisation (NOUVELLE LOGIQUE CRUCIALE)
-// ❌ SUPPRIMÉ : La gestion des permissions est maintenant faite après l'authentification
-        /*
-        if (isAuthenticated) {
-            if (!hasFineLocationPermission()) {
-                requestFineLocationPermission()
-            } else if (!hasBackgroundLocationPermission()) {
-                requestBackgroundLocationPermission()
-            } else {
-                startLocationService()
-            }
-        }
-        */
-
-
-        // Appel temporaire pour ajouter les POIs de test (si besoin)
-        //ajouterPoisDeTest()
-        // Vérifier les permissions UNIQUEMENT ici
-
-
     }
 
     private fun resetFirebaseState() {
@@ -852,6 +654,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         isAuthenticated = false
         isModerator = false
     }
+
     private fun checkIfModerator() {
         val moderatorEmails = listOf(
             "marc.paradinas@gmail.com",
@@ -873,69 +676,69 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         }
         android.util.Log.d("MODERATION", "===== FIN CHECK MODERATOR =====")
     }
-    /*
- private fun masquerCercleWithAnimation(poi: PointInteret) {
- Créer un cercle temporaire pour l'animation
-
-    val circle = mMap.addCircle(
-            CircleOptions()
-                .center(poi.position)
-                .radius(30.0)
-                .strokeColor(Color.argb(30, 190, 30, 250))
-                .fillColor(Color.argb(60, 190, 30, 250))
-                .strokeWidth(3f)
-                .zIndex(100f)  // Assurer qu'il est au-dessus
-        )
-
-        // Animation de disparition
-        val animator = ValueAnimator.ofFloat(1f, 0f).apply {
-            duration = 1000  // 1 seconde
-            addUpdateListener { animation ->
-                val alpha = animation.animatedValue as Float
-                circle.fillColor = Color.argb((60 * alpha).toInt(), 190, 30, 250)
-                circle.strokeColor = Color.argb((30 * alpha).toInt(), 190, 30, 250)
-            }
-            addListener(object : AnimatorListenerAdapter() {
-                override fun onAnimationEnd(animation: Animator) {
-                                    circle.remove()  // Supprimer le cercle après l'animation
-                    mMap.clear()
-                    chargerPointsInteret()
-                    currentLocation?.let { updateLocationMarker(it) }
-                }
-            })
-        }
-        animator.start()
-    }
- */
 
     private fun rafraichirCarte(location: Location?) {
-        android.util.Log.d("CARTE", "🔍 rafraichirCarte appelé avec location = ${location?.latitude}, ${location?.longitude}")
+        android.util.Log.d("CARTE", "🔍 rafraichirCarte appelé")
         if (!::mMap.isInitialized) return
         mMap.clear()
-        // ✅ CRITIQUE : Réinitialiser la référence au marqueur après avoir vidé la carte
         locationMarker = null
-        android.util.Log.d("CARTE", "🗑️ Marqueur réinitialisé à null après mMap.clear()")
-        // Redessiner tous les cercles NON déclenchés
+
         for (poi in pointsInteret) {
-            if (!pointsDejaDeclenches.contains(poi.id)) {
-                mMap.addCircle(
+            val shouldDisplay = when (poi.status) {
+                PoiStatus.VALIDATED -> !pointsDejaDeclenches.contains(poi.id)
+                PoiStatus.PROPOSED -> !pointsDejaDeclenches.contains(poi.id)
+                PoiStatus.INITIATED -> true // ✅ Les brouillons ne disparaissent jamais
+            }
+
+            if (shouldDisplay) {
+                val (strokeColor, fillColor) = when (poi.status) {
+                    PoiStatus.VALIDATED -> Pair(
+                        Color.argb(30, 190, 30, 250),  // Violet/bleu (couleur actuelle)
+                        Color.argb(60, 190, 30, 250)
+                    )
+                    PoiStatus.PROPOSED -> Pair(
+                        Color.argb(100, 76, 175, 80),  // Vert
+                        Color.argb(80, 76, 175, 80)
+                    )
+                    PoiStatus.INITIATED -> Pair(
+                        Color.argb(150, 255, 152, 0),  // Orange
+                        Color.argb(100, 255, 152, 0)
+                    )
+                }
+
+                val circle = mMap.addCircle(
                     CircleOptions()
                         .center(poi.position)
                         .radius(20.0)
-                        .strokeColor(Color.argb(30, 190, 30, 250))
-                        .fillColor(Color.argb(60, 190, 30, 250))
+                        .strokeColor(strokeColor)
+                        .fillColor(fillColor)
                         .strokeWidth(3f)
+                        .clickable(poi.status == PoiStatus.INITIATED) // ✅ Clickable si brouillon
                 )
+
+                // ✅ Stocker l'association cercle → POI pour gérer les clics
+                circle.tag = poi.id
+
+                // ✅ Afficher le début du message pour les POIs INITIATED
+                if (poi.status == PoiStatus.INITIATED) {
+                    val snippet = poi.message.take(30) + if (poi.message.length > 30) "..." else ""
+                    mMap.addMarker(
+                        MarkerOptions()
+                            .position(poi.position)
+                            .title(snippet)
+                            .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_ORANGE))
+                            .alpha(0.7f)
+                    )?.showInfoWindow()
+                }
             }
         }
-        // Réafficher le pointeur utilisateur
+
         location?.let { loc ->
-            android.util.Log.d("CARTE", "📍 Recréation du marqueur avec position : ${loc.latitude}, ${loc.longitude}")
+            android.util.Log.d("CARTE", "📍 Recréation du marqueur utilisateur")
             updateLocationMarker(loc)
-        } ?: run {
-            android.util.Log.w("CARTE", "⚠️ Impossible de réafficher le pointeur : position inconnue.")
         }
     }
+
     private fun playPendingPoi(location: Location) {
         val poi = pendingPoi ?: return
         // On marque le POI comme déclenché UNIQUEMENT quand on commence à le lire
@@ -976,8 +779,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 results
             )
             val distanceEnMetres = results[0]
-
-
             if (distanceEnMetres <= 20f) {
                 poiFound = true
                 if (isSpeakingPoi) {
@@ -994,7 +795,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 break
             }
         }
-
         // ✅ Si aucun POI n'est trouvé et qu'un POI est en attente,
         // cela signifie que l'utilisateur est sorti de la zone avant la lecture
         if (!poiFound && pendingPoi != null) {
@@ -1002,6 +802,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             pendingPoi = null
         }
     }
+
     private fun isNetworkAvailable(): Boolean {
         val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -1156,9 +957,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             }
             timeoutHandler.postDelayed(timeoutRunnable, 5000) // 5 secondes de timeout
 
-            // ✅ Définir le layout (déjà fait dans onCreate mais bon pour être sûr) DEJA FAIT DANS CREATE, A SUPPRIMER
-            //setContentView(R.layout.activity_main)
-
             // ✅ Charger les POIs depuis Firestore
             chargerPointsInteret()
 
@@ -1306,11 +1104,20 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         }
     }
 
-
     @RequiresPermission(anyOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
     override fun onMapReady(googleMap: GoogleMap) {
         mMap = googleMap
         mMap.uiSettings.isZoomControlsEnabled = true
+        // ✅ AJOUT : Listener de clic sur les cercles
+        mMap.setOnCircleClickListener { circle ->
+            val poiId = circle.tag as? String ?: return@setOnCircleClickListener
+            val poi = pointsInteret.find { it.id == poiId } ?: return@setOnCircleClickListener
+
+            if (poi.status == PoiStatus.INITIATED) {
+                showEditMyPoiDialog(poi)
+            }
+        }
+        // ✅ FIN AJOUT
 
         if (!hasFineLocationPermission()) {
             Log.w("MainActivity", "⚠️ Permission de localisation non accordée dans onMapReady")
@@ -1320,10 +1127,14 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             }
             return
         }
-
-
-        // ✅ Activer le bouton "Ma position" et la couche de localisation
-        mMap.isMyLocationEnabled = true
+        // ✅ Désactiver le bouton "Ma position" et la couche de localisation
+        mMap.isMyLocationEnabled = false
+        googleMap.uiSettings.isMyLocationButtonEnabled = true  // ✅ Garde le bouton de recentrage
+        try {
+            googleMap.setMyLocationEnabled(false)  // Désactive définitivement le marqueur bleu
+        } catch (e: SecurityException) {
+            Log.e("MAP", "Erreur permission localisation", e)
+        }
 
         // ✅ Charger les POIs depuis Firestore
         chargerPointsInteret()
@@ -1400,24 +1211,31 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             "message" to message,
             "creatorUid" to (currentUser?.uid ?: ""),
             "createdAt" to com.google.firebase.Timestamp.now(),
+            "status" to "initiated",  // ✅ Nouveau : statut "initiated"
             "approved" to false
         )
         firestore.collection("pois")
             .document(id)
             .set(poiData)
             .addOnSuccessListener {
-                Toast.makeText(this, "Point d'intérêt proposé (en attente de validation)", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Brouillon de POI enregistré. Vous pouvez le modifier avant de le proposer.", Toast.LENGTH_LONG).show()
+                chargerPointsInteret() // ✅ Recharger pour afficher le nouveau POI INITIATED
             }
             .addOnFailureListener { e ->
                 Toast.makeText(this, "Erreur: ${e.message}", Toast.LENGTH_SHORT).show()
             }
     }
     private fun chargerPointsInteret() {
+        val currentUser = auth.currentUser
+        val currentUid = currentUser?.uid
+
+        pointsInteret.clear()
+
+        // 1️⃣ Charger les POIs VALIDATED (visibles par tous)
         firestore.collection("pois")
-            .whereEqualTo("approved", true)
+            .whereEqualTo("status", "validated")
             .get()
             .addOnSuccessListener { result ->
-                pointsInteret.clear()
                 for (doc in result) {
                     val poi = PointInteret(
                         id = doc.getString("id") ?: doc.id,
@@ -1425,19 +1243,99 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                             doc.getDouble("lat") ?: 0.0,
                             doc.getDouble("lng") ?: 0.0
                         ),
-                        message = doc.getString("message") ?: ""
+                        message = doc.getString("message") ?: "",
+                        status = PoiStatus.VALIDATED,
+                        creatorUid = doc.getString("creatorUid")
                     )
                     pointsInteret.add(poi)
                 }
-                android.util.Log.d("POI", "✅ Chargés: ${pointsInteret.size} POIs depuis Firestore")
-                // ✅ Rafraîchir la carte après le chargement
-                rafraichirCarte(currentLocation)
-            }
+                android.util.Log.d("POI", "✅ ${pointsInteret.size} POIs VALIDATED chargés")
+// 2️⃣ Charger les POIs de l'utilisateur (INITIATED + PROPOSED)
+                if (currentUid != null) {
+                    if (isModerator) {
+                        // ✅ NOUVEAU : Modérateur voit TOUS les PROPOSED + ses POIs perso
+                        chargerPoisProposedPourModerateur(currentUid)
+                    } else {
+                        // ✅ EXISTANT : Utilisateur normal voit seulement ses POIs perso
+                        chargerMesPoisEnAttente(currentUid)
+                    }
+                } else {
+                    rafraichirCarte(currentLocation) // ✅ EXISTANT (inchangé)
+                }            }
             .addOnFailureListener { e ->
                 Toast.makeText(this, "Erreur chargement POI: ${e.message}", Toast.LENGTH_SHORT).show()
             }
     }
 
+    private fun chargerMesPoisEnAttente(uid: String) {
+        firestore.collection("pois")
+            .whereEqualTo("creatorUid", uid)
+            .whereIn("status", listOf("initiated", "proposed"))
+            .get()
+            .addOnSuccessListener { result ->
+                for (doc in result) {
+                    val status = poiStatusFromFirestore(
+                        doc.getBoolean("approved"),
+                        doc.getString("status")
+                    )
+                    val poi = PointInteret(
+                        id = doc.getString("id") ?: doc.id,
+                        position = LatLng(
+                            doc.getDouble("lat") ?: 0.0,
+                            doc.getDouble("lng") ?: 0.0
+                        ),
+                        message = doc.getString("message") ?: "",
+                        status = status,
+                        creatorUid = doc.getString("creatorUid")
+                    )
+                    pointsInteret.add(poi)
+                }
+                android.util.Log.d("POI", "✅ ${pointsInteret.size} POIs totaux (dont mes brouillons/proposés)")
+                rafraichirCarte(currentLocation)
+            }
+            .addOnFailureListener { e ->
+                android.util.Log.e("POI", "Erreur chargement mes POIs: ${e.message}")
+                rafraichirCarte(currentLocation)
+            }
+    }
+
+    /**
+     * Charge TOUS les POIs PROPOSED (pour modération) + les POIs perso de l'utilisateur
+     */
+    private fun chargerPoisProposedPourModerateur(uid: String) {
+        // 1️⃣ Charge d'abord TOUS les POIs PROPOSED
+        firestore.collection("pois")
+            .whereEqualTo("status", "proposed")
+            .get()
+            .addOnSuccessListener { proposedResult ->
+                for (doc in proposedResult) {
+                    val poi = PointInteret(
+                        id = doc.getString("id") ?: doc.id,
+                        position = LatLng(
+                            doc.getDouble("lat") ?: 0.0,
+                            doc.getDouble("lng") ?: 0.0
+                        ),
+                        message = doc.getString("message") ?: "",
+                        status = PoiStatus.PROPOSED,
+                        creatorUid = doc.getString("creatorUid")
+                    )
+                    // Évite les doublons (au cas où)
+                    if (pointsInteret.none { it.id == poi.id }) {
+                        pointsInteret.add(poi)
+                    }
+                }
+                Log.d("POI", "✅ ${proposedResult.size()} POIs PROPOSED chargés pour modération")
+
+                // 2️⃣ Charge ensuite les POIs perso (INITIATED) de l'utilisateur
+                chargerMesPoisEnAttente(uid)
+            }
+            .addOnFailureListener { e ->
+                Log.e("POI", "Erreur chargement POIs PROPOSED: ${e.message}")
+                // Même en cas d'erreur, charge au moins ses POIs perso
+                chargerMesPoisEnAttente(uid)
+            }
+    }
+/*
     private fun validerPoi(poiId: String) {
         firestore.collection("pois").document(poiId)
             .update("approved", true)
@@ -1449,14 +1347,57 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 Toast.makeText(this, "Erreur: ${e.message}", Toast.LENGTH_SHORT).show()
             }
     }
+    */
 
+    private fun showEditMyPoiDialog(poi: PointInteret) {
+        val dialogView = layoutInflater.inflate(R.layout.dialog_edit_poi, null)
+        val editMessage = dialogView.findViewById<EditText>(R.id.editPoiMessage)
+        editMessage.setText(poi.message)
+
+        // Masquer la checkbox du modérateur (on n'en a pas besoin ici)
+        val checkApproved = dialogView.findViewById<CheckBox>(R.id.checkApproved)
+        checkApproved.visibility = View.GONE
+
+        AlertDialog.Builder(this)
+            .setTitle("Modifier votre brouillon")
+            .setView(dialogView)
+            .setPositiveButton("Enregistrer") { _, _ ->
+                val newMessage = editMessage.text.toString().trim()
+                firestore.collection("pois").document(poi.id)
+                    .update("message", newMessage)
+                    .addOnSuccessListener {
+                        Toast.makeText(this, "Brouillon mis à jour", Toast.LENGTH_SHORT).show()
+                        chargerPointsInteret()
+                    }
+                    .addOnFailureListener { e ->
+                        Toast.makeText(this, "Erreur: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+            }
+            .setNeutralButton("Proposer à la modération") { _, _ ->
+                val newMessage = editMessage.text.toString().trim()
+                firestore.collection("pois").document(poi.id)
+                    .update(mapOf(
+                        "message" to newMessage,
+                        "status" to "proposed"
+                    ))
+                    .addOnSuccessListener {
+                        Toast.makeText(this, "POI proposé à la modération !", Toast.LENGTH_SHORT).show()
+                        chargerPointsInteret()
+                    }
+                    .addOnFailureListener { e ->
+                        Toast.makeText(this, "Erreur: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
     private fun showModerationDialog() {
         firestore.collection("pois")
-            .whereEqualTo("approved", false)
+            .whereEqualTo("status", "proposed")  // ✅ Charger uniquement les POIs "proposed"
             .get()
             .addOnSuccessListener { result ->
                 if (result.isEmpty) {
-                    Toast.makeText(this, "Aucun point en attente", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Aucun point en attente de modération", Toast.LENGTH_SHORT).show()
                     return@addOnSuccessListener
                 }
                 val pendingPois = result.documents.map { doc ->
@@ -1480,27 +1421,36 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 Toast.makeText(this, "Erreur: ${e.message}", Toast.LENGTH_SHORT).show()
             }
     }
-
     private fun showPoiEditDialog(poi: PendingPoi) {
         val dialogView = layoutInflater.inflate(R.layout.dialog_edit_poi, null)
         val editMessage = dialogView.findViewById<EditText>(R.id.editPoiMessage)
         val checkApproved = dialogView.findViewById<CheckBox>(R.id.checkApproved)
         editMessage.setText(poi.message)
         checkApproved.isChecked = false
+        checkApproved.text = "Valider ce POI"
+
         AlertDialog.Builder(this)
-            .setTitle("Modifier/valider POI")
+            .setTitle("Modérer POI")
             .setView(dialogView)
             .setPositiveButton("Enregistrer") { _, _ ->
                 val newMessage = editMessage.text.toString().trim()
-                val approved = checkApproved.isChecked
+                val validated = checkApproved.isChecked
+
+                val updates = mutableMapOf<String, Any>(
+                    "message" to newMessage
+                )
+
+                if (validated) {
+                    updates["status"] = "validated"
+                    updates["approved"] = true
+                }
+
                 firestore.collection("pois").document(poi.id)
-                    .update(mapOf(
-                        "message" to newMessage,
-                        "approved" to approved
-                    ))
+                    .update(updates)
                     .addOnSuccessListener {
-                        Toast.makeText(this, "POI mis à jour", Toast.LENGTH_SHORT).show()
-                        if (approved) chargerPointsInteret()
+                        val msg = if (validated) "POI validé !" else "POI mis à jour"
+                        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+                        if (validated) chargerPointsInteret()
                     }
                     .addOnFailureListener { e ->
                         Toast.makeText(this, "Erreur: ${e.message}", Toast.LENGTH_SHORT).show()
@@ -1509,6 +1459,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             .setNegativeButton("Annuler", null)
             .show()
     }
+
     @RequiresPermission(anyOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
     private fun startLocationUpdates() {
         // ✅ Vérifier la permission avec la nouvelle fonction
@@ -1601,18 +1552,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             mMap.animateCamera(CameraUpdateFactory.newLatLng(currentLatLng))
         }
     }
-/*
-    @RequiresPermission(anyOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == LOCATION_PERMISSION_REQUEST_CODE && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            if (::mMap.isInitialized) {
-                mMap.isMyLocationEnabled = false
-                startLocationUpdates()
-            }
-        }
-    }
-*/
+
 @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
 override fun onResume() {
     super.onResume()
