@@ -1,6 +1,7 @@
 package com.example.fayowdemo
 
 import android.Manifest
+import PoiManager
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
@@ -25,17 +26,14 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import java.util.Locale
 // ? NOUVEAU : Classe pour stocker les données d'un POI
-data class PoiData(
-    val latitude: Double,
-    val longitude: Double,
-    val message: String
-)
+
 class LocationService : Service(), TextToSpeech.OnInitListener {
 
     // Au début de la classe LocationService, avec les autres variables
+    private lateinit var poiManager: PoiManager
     private val poisLusIds = mutableSetOf<String>()
     // ? NOUVEAU : Stocke les POIs approuvés en mémoire
-    private val poiDocuments = mutableMapOf<String, PoiData>()
+    private val poiDocuments = mutableMapOf<String,PointInteret>()
     private var arePoiDocumentsLoaded = false
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var locationRequest: LocationRequest
@@ -60,78 +58,67 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    @Override
     override fun onCreate() {
         super.onCreate()
         Log.d("LocationService", "Service créé")
 
-        // Initialisation de base
+        // 1. Initialisation de PoiManager et Firebase
+        poiManager = PoiManager(FirebaseFirestore.getInstance(), FirebaseAuth.getInstance())
+
+        // 2. Initialisation du TTS (ton code existant)
         textToSpeech = TextToSpeech(this, this)
+
+        // 3. Acquisition du WakeLock (ton code existant)
         acquireWakeLock()
+
+        // 4. Création du canal de notification (ton code existant)
         createNotificationChannel()
+
+        // 5. Démarrage en foreground (ton code existant)
         startForeground(NOTIFICATION_ID, createNotification())
 
-        // ? Charge les POIs approuvés (une seule fois)
+        // 6. Chargement des POIs approuvés (adapté pour PoiManager)
         chargerPoisApprouves()
 
-        // Écouteur d'authentification
+        // 7. Écouteur d'authentification (ton code existant)
         auth.addAuthStateListener { firebaseAuth ->
             val user = firebaseAuth.currentUser
             if (user != null) {
-                Log.d("LocationService", "?? Utilisateur connecté. Chargement des POIs lus...")
+                Log.d("LocationService", "Utilisateur connecté. Chargement des POIs lus...")
                 isPoisLusReady = false
                 triggeredPois.clear()
                 if (!isLoadingPoisLus) {
                     chargerPoisLus(user.uid)
                 }
             } else {
-                Log.d("LocationService", "?? Utilisateur déconnecté")
+                Log.d("LocationService", "Utilisateur déconnecté")
                 poisLusIds.clear()
                 triggeredPois.clear()
                 isPoisLusReady = false
             }
         }
 
-        // Si l'utilisateur est déjà connecté, charge les POIs lus
+        // 8. Si l'utilisateur est déjà connecté, charge les POIs lus
         auth.currentUser?.let { user ->
             chargerPoisLus(user.uid)
         }
 
-        // ? Attend que TOUT soit prêt avant de démarrer
+        // 9. Attend que tout soit prêt avant de démarrer les mises à jour
         attendreEtDemarrer()
     }
     private fun chargerPoisApprouves() {
-        Log.d("LocationService", "? Chargement des POIs approuvés...")
+        Log.d("LocationService", "Chargement des POIs approuvés via PoiManager...")
 
-        firestore.collection("pois")
-            .whereEqualTo("approved", true)
-            .get()
-            .addOnSuccessListener { documents ->
-                poiDocuments.clear()
-                for (doc in documents) {
-                    // ? Récupère le statut du POI
-                    val statusString = doc.getString("status") ?: PoiStatus.VALIDATED.name
-                    val status = try {
-                        PoiStatus.valueOf(statusString)
-                    } catch (e: IllegalArgumentException) {
-                        PoiStatus.VALIDATED  // Valeur par défaut si le statut est invalide
-                    }
-
-                    // ? Ignore les INITIATED (oranges) - ils ne seront jamais en mémoire
-                    if (status == PoiStatus.INITIATED) continue
-
-                    val lat = doc.getDouble("lat") ?: continue
-                    val lng = doc.getDouble("lng") ?: continue
-                    val message = doc.getString("message") ?: continue
-
-                    poiDocuments[doc.id] = PoiData(lat, lng, message)
-                }
-                arePoiDocumentsLoaded = true
-                Log.d("LocationService", "? ${poiDocuments.size} POIs approuvés chargés")
+        poiManager.chargerPoisValidated { validatedPois ->
+            poiDocuments.clear()
+            for (poi in validatedPois) {
+                if (poi.status == PoiStatus.INITIATED) continue
+                poiDocuments[poi.id] = poi  // ✅ Stocke directement l'objet PointInteret
             }
-            .addOnFailureListener { e ->
-                arePoiDocumentsLoaded = true  // Évite un blocage
-                Log.e("LocationService", "? Erreur chargement POIs approuvés", e)
-            }
+            arePoiDocumentsLoaded = true
+            Log.d("LocationService", "${poiDocuments.size} POIs approuvés chargés")
+        }
     }
     private fun attendreEtDemarrer() {
         Handler(Looper.getMainLooper()).postDelayed({
@@ -281,38 +268,20 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
         Log.d("LocationService", "Mises à jour de localisation arrêtées")
     }
     private fun chargerPoisLus(uid: String) {
-        // ? Si déjà en cours de chargement, on ignore
-        if (isLoadingPoisLus) {
-            Log.d("LocationService", "?? Chargement des POIs lus déjà en cours, appel ignoré")
-            return
+        if (isLoadingPoisLus) return
+
+        isLoadingPoisLus = true
+        Log.d("LocationService", "Chargement des POIs lus via PoiManager pour UID: $uid")
+
+        // Utilise PoiManager pour charger les POIs lus
+        // (À ajouter dans PoiManager si ce n'est pas déjà fait)
+        poiManager.chargerPoisLus(uid) { poisLus ->
+            poisLusIds.clear()
+            poisLusIds.addAll(poisLus)
+            isPoisLusReady = true
+            isLoadingPoisLus = false
+            Log.d("LocationService", "${poisLusIds.size} POIs lus chargés via PoiManager")
         }
-
-        isLoadingPoisLus = true  // ? Marque comme "en cours"
-        Log.d("LocationService", "? Début chargement POIs lus pour UID: $uid")
-
-        firestore.collection("users")
-            .document(uid)
-            .collection("readPois")
-            .get()
-            .addOnSuccessListener { result ->
-                Log.d("LocationService", "?? Firestore: réponse reçue avec ${result.size()} documents")
-                poisLusIds.clear()
-                for (doc in result) {
-                    poisLusIds.add(doc.id)
-                    Log.d("LocationService", "  - POI lu chargé : ${doc.id}")
-                }
-                isPoisLusReady = true
-                isLoadingPoisLus = false  // ? Marque comme "terminé"
-                Log.d("LocationService", "? ${poisLusIds.size} POIs lus chargés. Prêt à vérifier.")
-            }
-            .addOnFailureListener { exception ->
-                isPoisLusReady = true
-                isLoadingPoisLus = false  // ? Marque comme "terminé" même en cas d'erreur
-                Log.e("LocationService", "? ERREUR Firestore lors du chargement des POIs lus", exception)
-            }
-            .addOnCompleteListener {
-                Log.d("LocationService", "?? Requête Firestore terminée (succès ou échec)")
-            }
     }
     private fun marquerPoiCommeLu(poiId: String) {
         val uid = auth.currentUser?.uid ?: return
@@ -347,10 +316,10 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
         val currentUid = auth.currentUser?.uid
 
         // ? Parcourt les POIs en mémoire (PAS de requête Firestore !)
-        for ((poiId, poiData) in poiDocuments) {
+        for ((poiId, poi) in poiDocuments) {
             val poiLocation = Location("").apply {
-                latitude = poiData.latitude
-                longitude = poiData.longitude
+                latitude = poi.position.latitude  // ✅ Utilise poi.position
+                longitude = poi.position.longitude // ✅ Utilise poi.position
             }
             val distance = location.distanceTo(poiLocation)
 
@@ -363,7 +332,7 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
                 && !poisLusIds.contains(poiId)) {
 
                 Log.d("LocationService", "?? Déclenchement du POI $poiId")
-                speak(poiData.message)
+                speak(poi.message)
                 triggeredPois.add(poiId)
 
                 // Marque comme lu si connecté

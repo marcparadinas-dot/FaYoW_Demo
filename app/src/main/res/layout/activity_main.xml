@@ -6,21 +6,22 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
+    <!-- android:background="?attr/colorPrimary"-->
     <!-- Toolbar en haut -->
     <androidx.appcompat.widget.Toolbar
         android:id="@+id/toolbar"
         android:layout_width="0dp"
         android:layout_height="110dp"
-        android:background="?attr/colorPrimary"
+        android:background="@drawable/fayow_bandeau_haut"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"
-        app:title="FaYoW"
+        app:title=""
         app:titleTextColor="@android:color/white"
-        app:subtitle="Enchantez vos trajets"
+        app:subtitle=""
         app:subtitleTextColor="@android:color/white" />
 
-    <!-- Fragment de carte -->
+<!-- Fragment de carte -->
     <fragment
         android:id="@+id/map"
         android:name="com.google.android.gms.maps.SupportMapFragment"
@@ -55,11 +56,12 @@
         app:layout_constraintEnd_toEndOf="parent" />
 
     <!-- Toolbar agrandie en bas de l'écran (maintenant un ConstraintLayout) -->
+    <!-- android:background="#FFFFFF" -->
     <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@+id/toolbarBottom"
         android:layout_width="0dp"
         android:layout_height="150dp"
-        android:background="#FFFFFF"
+        android:background="@drawable/fayow_bandeau_bas"
         android:elevation="8dp"
         android:padding="16dp"
         app:layout_constraintBottom_toBottomOf="parent"
@@ -99,3 +101,5 @@
     </androidx.constraintlayout.widget.ConstraintLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>
+
+
