@@ -2,7 +2,7 @@ package com.example.fayowdemo
 
 import com.google.android.gms.maps.model.LatLng
 
-data class PointInteret(
+/*data class PointInteret(
     val id: String,
     val position: LatLng,
     val message: String,
@@ -12,4 +12,4 @@ data class PointInteret(
 
 enum class PoiStatus {
     INITIATED, PROPOSED, VALIDATED
-}
+}*/
