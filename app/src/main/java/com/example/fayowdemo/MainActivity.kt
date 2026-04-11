@@ -394,15 +394,15 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         if (shouldShowRequestPermissionRationale(Manifest.permission.ACCESS_BACKGROUND_LOCATION)) {
             Log.d("MainActivity", "?? Affichage d'une explication pour BACKGROUND_LOCATION")
             AlertDialog.Builder(this)
-                .setTitle("Toujours autoriser l'acc s position...")
-                .setMessage("... dans l' cran suivant, puis revenir en arrière. Cette permission permet   l'application de vous alerter même quand l' cran est  teint.")
+                .setTitle("Cocher 'Toujours autoriser' ...")
+                .setMessage("... dans l'écran suivant autorisant la position, puis revenir en arrière. Cette permission permet à l'application de vous alerter même quand l'écran est éteint.")
                 .setPositiveButton("OK") { _, _ ->
                     backgroundLocationPermissionLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
                 }
                 .setNegativeButton("Annuler") { _, _ ->
                     Toast.makeText(
                         this,
-                        "Les alertes ne fonctionneront pas quand l' cran est  teint.",
+                        "Les alertes ne fonctionneront pas quand l'écran est éteint.",
                         Toast.LENGTH_LONG
                     ).show()
                     startLocationService() // démarrer quand même (mais limité)
