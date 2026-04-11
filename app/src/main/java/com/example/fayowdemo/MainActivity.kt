@@ -615,6 +615,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 }.map { it.id }.toSet()
 
                 pointsDejaDeclenches.removeAll(poisDansLeRayon)
+                poisLusIds.removeAll(poisDansLeRayon)
                 sauvegarderPoisDeclenches()
 
                 if (::mMap.isInitialized) {
@@ -656,6 +657,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                     onSuccess = { ids ->
                         val avant = pointsDejaDeclenches.size
                         pointsDejaDeclenches.removeAll(ids)
+                        poisLusIds.removeAll(ids)
                         sauvegarderPoisDeclenches()
 
                         if (::mMap.isInitialized) {
@@ -686,6 +688,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             .setMessage("Toutes les anecdotes déjà lues seront réaffichées temporairement. Votre historique de lecture reste conservé.")
             .setPositiveButton("Confirmer") { _, _ ->
                 pointsDejaDeclenches.clear()
+                poisLusIds.clear()
                 sauvegarderPoisDeclenches()
 
                 if (::mMap.isInitialized) {
