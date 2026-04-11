@@ -564,6 +564,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 onSuccess = { Log.d("MainActivity", "POI ${poi.id} marqué comme lu") },
                 onError = { Log.e("MainActivity", "Erreur marquage POI lu") }
             )
+        } else if (poi.status == PoiStatus.PROPOSED) {
+            // PROPOSED : ajouté à poisLusIds en mémoire uniquement pour cette session
+            poisLusIds.add(poi.id)
+            Log.d("MainActivity", "POI ${poi.id} PROPOSED — lu en session uniquement")
         }
     }
 

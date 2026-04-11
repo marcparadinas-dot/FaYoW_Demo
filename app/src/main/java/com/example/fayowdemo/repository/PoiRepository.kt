@@ -108,7 +108,7 @@ class PoiRepository {
         onError: (Exception) -> Unit
     ) {
         firestore.collection("pois")
-            .whereEqualTo("approved", true)
+            .whereIn("status", listOf("validated", "proposed")) // ← modifié
             .get()
             .addOnSuccessListener { result ->
                 val poiMap = mutableMapOf<String, PoiData>()
@@ -119,15 +119,14 @@ class PoiRepository {
                     } catch (e: IllegalArgumentException) {
                         PoiStatus.VALIDATED
                     }
-                    // Les brouillons (INITIATED) ne sont jamais mis en cache
                     if (status == PoiStatus.INITIATED) continue
 
                     val lat     = doc.getDouble("lat") ?: continue
                     val lng     = doc.getDouble("lng") ?: continue
                     val message = doc.getString("message") ?: continue
-                    poiMap[doc.id] = PoiData(lat, lng, message)
+                    poiMap[doc.id] = PoiData(lat, lng, message, status) // ← on passe le statut
                 }
-                Log.d("PoiRepository", "${poiMap.size} POIs approuvés chargés pour le cache")
+                Log.d("PoiRepository", "${poiMap.size} POIs chargés pour le cache")
                 onSuccess(poiMap)
             }
             .addOnFailureListener { onError(it) }

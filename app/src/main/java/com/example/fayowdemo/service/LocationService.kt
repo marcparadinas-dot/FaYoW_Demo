@@ -282,7 +282,13 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
                 Log.d("LocationService", "POI $poiId déclenché")
                 speak(poiData.message)
                 triggeredPois.add(poiId)
-                marquerPoiCommeLu(poiId)
+
+                // On marque comme lu uniquement les POIs VALIDATED
+                if (poiData.status == PoiStatus.VALIDATED) {
+                    marquerPoiCommeLu(poiId)
+                } else {
+                    Log.d("LocationService", "POI $poiId PROPOSED — non marqué comme lu")
+                }
             }
 
             if (distance > PROXIMITY_THRESHOLD * 2 && triggeredPois.remove(poiId)) {

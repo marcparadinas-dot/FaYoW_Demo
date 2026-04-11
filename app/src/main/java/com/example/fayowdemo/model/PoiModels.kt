@@ -21,9 +21,9 @@ data class PendingPoi(
 data class PoiData(
     val latitude: Double,
     val longitude: Double,
-    val message: String
+    val message: String,
+    val status: PoiStatus = PoiStatus.VALIDATED // ← ajouté
 )
-
 // --- Enum ---
 
 enum class PoiStatus {
