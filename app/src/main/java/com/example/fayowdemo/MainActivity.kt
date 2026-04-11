@@ -81,7 +81,7 @@ interface AuthActions {
 }
 
 
-// POI en attente de mod ration
+// POI en attente de modération
 data class PendingPoi(
     val id: String,
     val message: String
@@ -101,10 +101,46 @@ fun poiStatusFromFirestore(approved: Boolean?, status: String?): PoiStatus {
 
 @RequiresApi(Build.VERSION_CODES.CUPCAKE)
 class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListener {
+    //private var currentDialogRef: WeakReference<AlertDialog>? = null  // ✅ Référence faible pour éviter les fuites
+    //private var currentPoiIdInDialog: String? = null                  // ✅ Stocke l'ID du POI du pop-up actuelprivate var isDialogShown = false  // ✅ Nouveau flag
+// ✅ NOUVEAUX RECEIVERS POUR TTS ET ERREURS (à ajouter avec les autres propriétés)
+    private val queueLock = Any()  // Verrou pour synchroniser l'accès à la file
+    private var currentUtteranceId: String? = null  // ID du message TTS en cours
+    private lateinit var ttsStartReceiver: BroadcastReceiver
+    private lateinit var ttsDoneReceiver: BroadcastReceiver
+    private lateinit var ttsErrorReceiver: BroadcastReceiver
+    private lateinit var locationErrorReceiver: BroadcastReceiver
+    private val timeoutHandler = Handler(Looper.getMainLooper())
+    private var poiMessageQueue = mutableListOf<Pair<String, String>>()
+    private var currentDialog: AlertDialog? = null
+    private var isProcessingQueue = false
+    // Déclaration du BroadcastReceiver avec logs
+    private val poiMessageReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == "com.sncf.fayowdemo.POI_DETECTED") {
+                val message = intent.getStringExtra("message") ?: return
+                val poiId = intent.getStringExtra("poiId") ?: return
+                val utteranceId = intent.getStringExtra("utteranceId") ?: return
+
+                Log.d("MainActivity", "POI $poiId reçu: $message (utteranceId=$utteranceId)")
+
+                // ✅ Ajoute à la file pour afficher le pop-up (sans TTS)
+                synchronized(queueLock) {
+                    if (!poisLusIds.contains(poiId) && !poiMessageQueue.any { it.first == poiId }) {
+                        poiMessageQueue.add(Pair(poiId, message))
+                        if (!isProcessingQueue) {
+                            processPoiMessageQueue()  // Affiche le pop-up (TTS géré par LocationService)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    private var isLocationServiceStarted = false  // ✅ Flag pour éviter les redémarrages
     private var isTtsReady = false
     private var isModerator: Boolean = false
     private lateinit var mMap: GoogleMap
-    // Map pour stocker les cercles des POIs, avec leur ID comme cl
+    // Map pour stocker les cercles des POIs, avec leur ID comme clé
     private val poiCircles = mutableMapOf<String, Circle>()
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var locationRequest: LocationRequest
@@ -127,11 +163,28 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     private var currentLocation: Location? = null
     private var isAuthenticated by mutableStateOf(false)
     private lateinit var textToSpeech: TextToSpeech
-    private var currentDialog: AlertDialog? = null
     private var isSpeakingPoi = false  // Indique si un POI est en cours de lecture
     private var currentPoiId: String? = null  // ID du POI actuellement lu
-    private var pendingPoi: PointInteret? = null  // POI en attente (un seul   la fois)
+    private var pendingPoi: PointInteret? = null  // POI en attente (un seul à la fois)
+
     /*private var hasShownPermissionDeniedToast = false*/
+    // Ajoute ce receiver pour les mises à jour de localisation
+    private val locationUpdateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == "com.sncf.fayow.LOCATION_UPDATE") {
+                val latitude = intent.getDoubleExtra("latitude", 0.0)
+                val longitude = intent.getDoubleExtra("longitude", 0.0)
+                val location = Location("").apply {
+                    this.latitude = latitude
+                    this.longitude = longitude
+                }
+                runOnUiThread {
+                    updateLocationMarker(location)  // ✅ Met à jour le pointeur
+                    rafraichirCarte(location)       // ✅ Rafraîchit la carte (sans verifierPointsInteret)
+                }
+            }
+        }
+    }
     private val poiUpdateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == "com.sncf.fayow.POI_LU") {
@@ -141,7 +194,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                     // Suppression du cercle de la carte
                     poiCircles[id]?.remove() // Supprime le cercle visuellement
                     poiCircles.remove(id)    // Retire l'entr e de notre map
-                    // Mise   jour de poisLusIds si n cessaire pour  viter de le re-charger
+                    // Mise à jour de poisLusIds si nécessaire pour éviter de le re-charger
                     if (!poisLusIds.contains(id)) {
                         poisLusIds.add(id)
                     }
@@ -149,10 +202,35 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             }
         }
     }
+    private fun processPoiMessageQueue() {
+        synchronized(queueLock) {
+            if (isProcessingQueue || poiMessageQueue.isEmpty()) return
+
+            isProcessingQueue = true
+            val (poiId, message) = poiMessageQueue.removeAt(0)
+            currentUtteranceId = "poi_message_$poiId"
+
+            // ✅ Affiche le pop-up (sans lancer le TTS, car c'est LocationService qui le fait)
+            runOnUiThread {
+                currentDialog = AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Point d'intérêt")
+                    .setMessage(message)
+                    .setPositiveButton("OK") { dialog, _ ->
+                        dialog.dismiss()
+                        synchronized(queueLock) { isProcessingQueue = false }
+                    }
+                    .setOnDismissListener {
+                        currentDialog = null
+                    }
+                    .show()
+            }
+        }
+    }
+    // ✅ NOUVEAU : Reçoit les POIs détectés pour afficher le message à l'écran
     private var poisLusLoaded = false
     private var isRequestingPermissions = false  // ?? NOUVEAU FLAG
     private val poisLusIds = mutableSetOf<String>()
-    // ? Launcher pour demander la permission localisation FINE ( tape 1)
+    // ? Launcher pour demander la permission localisation FINE (étape 1)
     private val fineLocationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
@@ -164,7 +242,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         } else {
             Log.e("MainActivity", "? Permission FINE refusée via Launcher")
 
-            // V rifier L' TAT R EL de la permission (pas juste shouldShowRequestPermissionRationale)
+            // Vérifier L' TAT R EL de la permission (pas juste shouldShowRequestPermissionRationale)
             val actualPermissionState = ContextCompat.checkSelfPermission(
                 this,
                 Manifest.permission.ACCESS_FINE_LOCATION
@@ -183,6 +261,13 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             }
         }
     }
+
+    // ✅ Fonction pour vérifier si l'activité est au premier plan
+    private fun isActivityForeground(): Boolean {
+        val appProcessInfo = ActivityManager.RunningAppProcessInfo()
+        ActivityManager.getMyMemoryState(appProcessInfo)
+        return appProcessInfo.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+    }
     private fun showPermissionSettingsDialog() {
         AlertDialog.Builder(this)
             .setTitle("Permission requise")
@@ -199,7 +284,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             .setCancelable(false)
             .show()
     }
-    // ? Launcher pour demander la permission localisation arri re-plan ( tape 2)
+    // ? Launcher pour demander la permission localisation arrière-plan (étape 2)
     private val backgroundLocationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
@@ -213,35 +298,30 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 Toast.LENGTH_LONG
             ).show()
         }
-        // QU'ELLE SOIT ACCORD E OU REFUS E, ON D MARRE LES SERVICES APR S CETTE  TAPE
+        // QU'ELLE SOIT ACCORDEE OU REFUSEE, ON DEMARRE LES SERVICES APRES CETTE ETAPE
         startAppFeatures(); // ?? NOUVEL APPEL
     }
     private fun startAppFeatures() {
-        // S'assurer que l'authentification est OK avant de d marrer
         if (!isAuthenticated) {
-            Log.w("MainActivity", "StartAppFeatures appelée mais utilisateur non authentifié.")
-            // G rer le cas o  l'utilisateur n'est pas encore connect
-            // Peut- tre attendre l' v nement de connexion pour appeler startAppFeatures()
-            return;
+            Log.w("MainActivity", "startAppFeatures appelée mais utilisateur non authentifié.")
+            return
         }
 
         Log.d("MainActivity", "Démarrage des fonctionnalités de l'application...")
 
-        // Initialiser la carte si elle ne l'est pas encore
+        // Initialise la carte si nécessaire
         if (!::mMap.isInitialized) {
             initializeMapView()
         }
 
-        // D marrer les mises   jour de localisation si la permission FINE est l
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-            startLocationUpdates()
+        // Démarre UNIQUEMENT le service (pas de startLocationUpdates() ici)
+        if (hasFineLocationPermission()) {
+            startLocationService()  // ✅ Conserve uniquement cet appel
         } else {
-            Log.w("MainActivity", "Impossible de démarrer les mises à jour de localisation: permission FINE manquante.")
+            Log.w("MainActivity", "Permission FINE_LOCATION manquante pour démarrer le service.")
         }
-
-        // D marrer le service de localisation (il g rera lui-m me les restrictions BACKGROUND)
-        startLocationService()
     }
+
     private fun hasAllLocationPermissions(): Boolean {
         val fineLocationGranted = ContextCompat.checkSelfPermission(
             this,
@@ -257,15 +337,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     }
 
 
-    override fun onDestroy() {
-        if (::textToSpeech.isInitialized) {
-            textToSpeech.stop()
-            textToSpeech.shutdown()
-            android.util.Log.d("TTS", "Moteur TTS arrété et libéré.")
-        }
-        super.onDestroy()
-        stopLocationService()
-    }
+
     /*
         private fun ajouterPoisDeTest() {
             val firestore =
@@ -276,7 +348,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 mapOf(
                     "lat" to 48.8539240,
                     "lng" to 2.3722890,
-                    "message" to "Ici, vous  tes   l extr mit  ouest de la rue de Lappe : remarquez la perspective vers la place de la Bastille et l organisation typique des rues du faubourg Saint-Antoine.",
+                    "message" to "Ici, vous êtes à l extrémité ouest de la rue de Lappe : remarquez la perspective vers la place de la Bastille et l' 'organisation typique des rues du faubourg Saint-Antoine.",
                     "approved" to true,
                     "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
                     "createdAt" to com.google.firebase.Timestamp.now()
@@ -284,7 +356,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 mapOf(
                     "lat" to 48.8538500,
                     "lng" to 2.3725000,
-                    "message" to "Observez l'architecture des immeubles du d but du XXe si cle, souvent avec des fa ades en pierre de taille et des ornements discrets, t moins de l' volution urbaine du quartier.",
+                    "message" to "Observez l'architecture des immeubles du début du XXe siècle, souvent avec des façades en pierre de taille et des ornements discrets, témoins de l'évolution urbaine du quartier.",
                     "approved" to true,
                     "creatorUid" to "i7IiNZfZdLXtRzjauduvHGUtLMt1",
                     "createdAt" to com.google.firebase.Timestamp.now()
@@ -292,11 +364,11 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             )
 
             for (poiData in poisATester) {
-                // ? G n re un ID bas  sur le timestamp (comme dans ton app)
+                // ? Génère un ID basé sur le timestamp (comme dans ton app)
                 val id = System.currentTimeMillis().toString()  // Ex: "1773079406607"
 
 
-                // Ajoute l'ID dans les donn es du POI
+                // Ajoute l'ID dans les données du POI
                 val poiWithId = poiData.toMutableMap()
                 poiWithId["id"] = id
 
@@ -312,12 +384,12 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                     }
 
 
-                // ?? Petite pause pour  viter d'avoir le m me timestamp pour 2 POIs
-                Thread.sleep(10)  // Pause de 10ms entre chaque cr ation
+                // ?? Petite pause pour éviter d'avoir le même timestamp pour 2 POIs
+                Thread.sleep(10)  // Pause de 10ms entre chaque création
             }
         }
     */
-    // ? Fonction pour v rifier si ACCESS_FINE_LOCATION est accord e
+    // ? Fonction pour Vérifier si ACCESS_FINE_LOCATION est accordée
     private fun hasFineLocationPermission(): Boolean {
         return ContextCompat.checkSelfPermission(
             this,
@@ -325,7 +397,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         ) == PackageManager.PERMISSION_GRANTED
     }
 
-    // ? Fonction pour v rifier si ACCESS_BACKGROUND_LOCATION est accord e
+    // ? Fonction pour Vérifier si ACCESS_BACKGROUND_LOCATION est accordée
     private fun hasBackgroundLocationPermission(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ContextCompat.checkSelfPermission(
@@ -358,7 +430,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                     fineLocationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
                 }
                 .setNegativeButton("Refuser") { _, _ ->
-                    isRequestingPermissions = false  // ?? R initialiser le flag
+                    isRequestingPermissions = false  // ?? Réinitialiser le flag
                     Toast.makeText(this, "L'application ne peut pas fonctionner sans localisation", Toast.LENGTH_LONG).show()
                 }
                 .show()
@@ -371,7 +443,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     private fun requestBackgroundLocationPermission() {
         Log.d("MainActivity", "?? Demande de permission ACCESS_BACKGROUND_LOCATION")
 
-        // V rifier si la permission est d j  accord e
+        // Vérifier si la permission est déjà accordée
         if (ContextCompat.checkSelfPermission(
                 this,
                 Manifest.permission.ACCESS_BACKGROUND_LOCATION
@@ -382,7 +454,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             return
         }
 
-        // V rifier si on peut montrer un rationale
+        // Vérifier si on peut montrer un rationale
         if (shouldShowRequestPermissionRationale(Manifest.permission.ACCESS_BACKGROUND_LOCATION)) {
             Log.d("MainActivity", "?? Affichage d'une explication pour BACKGROUND_LOCATION")
             AlertDialog.Builder(this)
@@ -397,7 +469,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                         "Les alertes ne fonctionneront pas quand l'écran est éteint.",
                         Toast.LENGTH_LONG
                     ).show()
-                    startLocationService() // D marrer quand m me (mais limit )
+                    startLocationService() // Démarrer quand même (mais limité)
                 }
                 .show()
         } else {
@@ -407,17 +479,35 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     }
 
     // ? Nouvelle version de startLocationService()
+
     private fun startLocationService() {
+        if (isLocationServiceStarted) {
+            Log.d("MainActivity", "LocationService déjà démarré, ignoré.")
+            return  // ✅ Évite les redémarrages inutiles
+        }
+
         Log.d("MainActivity", "Tentative de démarrage du LocationService")
 
-        // On v rifie qu'on a au moins la permission FINE_LOCATION
-        // La permission BACKGROUND_LOCATION est g r e avant d'appeler cette fonction dans onCreate
         if (!hasFineLocationPermission()) {
-            Log.e("MainActivity", "? Impossible de d marrer le service : ACCESS_FINE_LOCATION non accord e.")
-            Toast.makeText(this, "Impossible de d marrer le service de localisation sans permission.", Toast.LENGTH_LONG).show()
+            Log.e("MainActivity", "Impossible de démarrer le service : ACCESS_FINE_LOCATION non accordée.")
+            Toast.makeText(this, "Impossible de démarrer le service de localisation sans permission.", Toast.LENGTH_LONG).show()
             return
         }
 
+        val serviceIntent = Intent(this, LocationService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent)
+            Log.d("MainActivity", "Service démarré en foreground")
+        } else {
+            startService(serviceIntent)
+            Log.d("MainActivity", "Service démarré")
+        }
+
+        isLocationServiceStarted = true  // ✅ Marque comme démarré
+    }
+
+    // ? NOUVELLE FONCTION : Démarrage réel du service
+    /*private fun startLocationServiceInternal() {
         val serviceIntent = Intent(this, LocationService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(serviceIntent)
@@ -425,18 +515,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         } else {
             startService(serviceIntent)
             Log.d("MainActivity", "?? Service démarré")
-        }
-    }
-
-    // ? NOUVELLE FONCTION : D marrage r el du service
-    /*private fun startLocationServiceInternal() {
-        val serviceIntent = Intent(this, LocationService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent)
-            Log.d("MainActivity", "?? Service d marr  en foreground")
-        } else {
-            startService(serviceIntent)
-            Log.d("MainActivity", "?? Service d marr ")
         }
     }*/
 
@@ -462,8 +540,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             }
             .addOnFailureListener { e ->
                 Log.e("POI", "Erreur chargement POIs lus: ${e.message}")
-                poisLusLoaded = true   // on consid re charg  m me en cas d erreur
-                onComplete() // on continue quand m me
+                poisLusLoaded = true   // on considère chargé même en cas d'erreur
+                onComplete() // on continue quand même
             }
     }
 
@@ -472,8 +550,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         val savedSet = prefs.getStringSet("pois_declenches", emptySet()) ?: emptySet()
         pointsDejaDeclenches.clear()
         pointsDejaDeclenches.addAll(savedSet)
-        android.util.Log.d("POI", "Chargés ${pointsDejaDeclenches.size} POIs déjà déclenchés depuis les préférences.")
-        android.util.Log.d("POI", "Contenu de pointsDejaDeclenches : $pointsDejaDeclenches")  // AJOUTE CE LOG
+        Log.d("POI", "Chargés ${pointsDejaDeclenches.size} POIs déjà déclenchés depuis les préférences.")
+        Log.d("POI", "Contenu de pointsDejaDeclenches : $pointsDejaDeclenches")  // AJOUTE CE LOG
 
 
         // 2. Charge les POIs lus depuis Firestore (sous-collection readPois)
@@ -488,11 +566,11 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             .collection("readPois")  // ? Utilise la sous-collection (comme dans LocationService)
             .get()
             .addOnSuccessListener { documents ->
-                val poisLus = documents.map { it.id }  // R cup re les IDs des POIs lus
+                val poisLus = documents.map { it.id }  // Récupère les IDs des POIs lus
                 pointsDejaDeclenches.addAll(poisLus)  // Fusionne avec les POIs locaux
                 Log.d("POI", "Après Firestore, pointsDejaDeclenches : $pointsDejaDeclenches (${pointsDejaDeclenches.size}  l ments)")
 
-                // 3. Sauvegarde le r sultat fusionn  dans les SharedPreferences pour les prochains lancements
+                // 3. Sauvegarde le résultat fusionné dans les SharedPreferences pour les prochains lancements
                 prefs.edit()
                     .putStringSet("pois_declenches", pointsDejaDeclenches)
                     .apply()
@@ -505,19 +583,19 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     private fun sauvegarderPoisDeclenches() {
         val prefs = getSharedPreferences("FayowPrefs", Context.MODE_PRIVATE)
         prefs.edit().putStringSet("pois_declenches", pointsDejaDeclenches).apply()
-        android.util.Log.d("POI", "Sauvegarde de ${pointsDejaDeclenches.size} POIs déclenchés.")
+        Log.d("POI", "Sauvegarde de ${pointsDejaDeclenches.size} POIs déclenchés.")
     }
     /*
         @RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
         private fun reinitialiserPoisDeclenches() {
-            // Vider la liste en m moire
+            // Vider la liste en mémoire
             pointsDejaDeclenches.clear()
 
-            // Vider ce qui est stock  en local
+            // Vider ce qui est stocké en local
             val prefs = getSharedPreferences("FayowPrefs", MODE_PRIVATE)
             prefs.edit().remove("pois_declenches").apply()
 
-            // Rafra chir la carte avec la derni re position connue
+            // Rafra chir la carte avec la dernière position connue
             rafraichirCarte(currentLocation)
 
             // ? FORCER UNE MISE   JOUR GPS IMM DIATE
@@ -529,7 +607,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                             updateLocationMarker(lastLocation)
                             Log.d("LOCATION", "? Position r cup r e apr s r initialisation : ${lastLocation.latitude}, ${lastLocation.longitude}")
                         } else {
-                            // Si aucune position en cache, demander une nouvelle mise   jour
+                            // Si aucune position en cache, demander une nouvelle mise à jour
                             requestSingleLocationUpdate()
                         }
                     }
@@ -540,7 +618,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 requestLocationPermission()
             }
 
-            Toast.makeText(this, "? Tous les POIs sont   nouveau disponibles !", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "? Tous les POIs sont à nouveau disponibles !", Toast.LENGTH_SHORT).show()
         }
 
      */
@@ -549,7 +627,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     private fun reinitialiserPoisDeclenches() {
         Log.d("REINIT", "?? Début de la réinitialisation")
 
-        // Vider la liste en m moire des POIs d clench s (ceux qui ont d j  parl )
+        // Vider la liste en mémoire des POIs déclenchés (ceux qui ont déjà parlé)
         pointsDejaDeclenches.clear()
         Log.d("REINIT", "? pointsDejaDeclenches vid  (${pointsDejaDeclenches.size}  éléments)")
 
@@ -589,7 +667,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             Log.w("REINIT", "?? Utilisateur non connecté, impossible de supprimer les POIs lus de Firestore.")
         }
 
-        // Rafra chir la carte pour afficher tous les POIs
+        // Rafra chir la carte pouRéafficher tous les POIs
         Log.d("REINIT", "??? Rafraichissement de la carte avec ${pointsInteret.size} POIs")
         rafraichirCarte(currentLocation)
 
@@ -602,7 +680,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     }*/
 
     private fun marquerPoiCommeLu(uid: String, poiId: String) {
-        if (poisLusIds.contains(poiId)) return // d j  fait
+        if (poisLusIds.contains(poiId)) return // déjà fait
 
         poisLusIds.add(poiId)
 
@@ -624,7 +702,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             }
     }
 
-    // ? NOUVELLE FONCTION : Demander une seule mise   jour de localisation
+    // ? NOUVELLE FONCTION : Demander une seule mise à jour de localisation
     /*@RequiresPermission(anyOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
     private fun requestSingleLocationUpdate() {
         if (!hasLocationPermission()) return
@@ -637,149 +715,179 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                         locationResult.lastLocation?.let { newLocation ->
                             currentLocation = newLocation
                             updateLocationMarker(newLocation)
-                            android.util.Log.d("LOCATION", "?? Nouvelle position obtenue : ${newLocation.latitude}, ${newLocation.longitude}")
+                            Log.d("LOCATION", "?? Nouvelle position obtenue : ${newLocation.latitude}, ${newLocation.longitude}")
                         }
-                        fusedLocationClient.removeLocationUpdates(this) // Arr ter apr s avoir re u la position
+                        fusedLocationClient.removeLocationUpdates(this) // Arrêter après avoir reçu la position
                     }
                 },
                 Looper.getMainLooper()
             )
         } catch (e: SecurityException) {
-            android.util.Log.e("LOCATION", "? Erreur de permission pour la mise   jour GPS : ${e.message}")
+            Log.e("LOCATION", "? Erreur de permission pour la mise à jour GPS : ${e.message}")
         }
     }*/
 
     @RequiresApi(Build.VERSION_CODES.CUPCAKE)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // 1. Initialisation propre de Firebase
+        Log.d("MainActivity", "🛠️ onCreate appelé")
+
+        // 1. Initialisation des BroadcastReceivers pour les événements TTS
+        ttsStartReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == "com.sncf.fayowdemo.TTS_STARTED") {
+                    val utteranceId = intent.getStringExtra("utteranceId") ?: return
+                    currentUtteranceId = utteranceId
+                    Log.d("MainActivity", "🎤 Lecture TTS démarrée (utteranceId=$utteranceId)")
+
+                    // Extraire l'ID du POI
+                    val poiId = utteranceId.removePrefix("poi_message_")
+                    val message = poiMessageQueue.firstOrNull { it.first == poiId }?.second
+
+                    if (message != null) {
+                        runOnUiThread {
+                            currentDialog?.dismiss() // Ferme le pop-up précédent
+
+                            // Estime la durée du message (en ms) : ~150 ms par mot + marge
+                            val wordCount = message.split(" ").size
+                            val estimatedDuration = (wordCount * 350L + 2000L).coerceAtLeast(10000L)
+
+                            currentDialog = AlertDialog.Builder(this@MainActivity)
+                                .setTitle("Point d'intérêt")
+                                .setMessage(message)
+                                .setPositiveButton("OK") { dialog, _ -> dialog.dismiss() }
+                                .setOnDismissListener {
+                                    currentDialog = null
+                                }
+                                .show()
+
+                            // ✅ Timeout DYNAMIQUE basé sur la durée estimée du message
+                            timeoutHandler.removeCallbacksAndMessages(null) // Annule le timeout précédent
+                            timeoutHandler.postDelayed({
+                                if (currentDialog != null && currentUtteranceId == utteranceId) {
+                                    Log.w("MainActivity", "Pop-up fermé par timeout pour $utteranceId (durée estimée: ${estimatedDuration}ms)")
+                                    currentDialog?.dismiss()
+                                    currentDialog = null
+                                }
+                            }, estimatedDuration)
+                        }
+                    }
+                }
+            }
+        }
+
+        ttsDoneReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == "com.sncf.fayowdemo.TTS_DONE") {
+                    val utteranceId = intent.getStringExtra("utteranceId") ?: return
+                    Log.d("MainActivity", "🎤 Lecture TTS terminée (utteranceId=$utteranceId)")
+
+                    runOnUiThread {
+                        // Annule le timeout si le pop-up est toujours ouvert
+                        timeoutHandler.removeCallbacksAndMessages(null)
+
+                        if (utteranceId == currentUtteranceId) {
+                            currentDialog?.dismiss()
+                            currentDialog = null
+                            currentUtteranceId = null
+                        }
+                    }
+                }
+            }
+        }
+
+        ttsErrorReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == "com.sncf.fayowdemo.TTS_ERROR") {
+                    val utteranceId = intent.getStringExtra("utteranceId") ?: return
+                    Log.e("MainActivity", "⚠️ Erreur TTS (utteranceId=$utteranceId)")
+
+                    runOnUiThread {
+                        timeoutHandler.removeCallbacksAndMessages(null)
+                        Toast.makeText(this@MainActivity, "Erreur de lecture vocale", Toast.LENGTH_SHORT).show()
+                        if (utteranceId == currentUtteranceId) {
+                            currentDialog?.dismiss()
+                            currentDialog = null
+                            currentUtteranceId = null
+                        }
+                    }
+                }
+            }
+        }
+
+        locationErrorReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == "com.sncf.fayowdemo.LOCATION_ERROR") {
+                    val error = intent.getStringExtra("error") ?: "Erreur inconnue"
+                    Log.e("MainActivity", "⚠️ Erreur de localisation: $error")
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, "Erreur: $error", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+        // 2. Enregistrement du BroadcastReceiver pour les POIs
+        LocalBroadcastManager.getInstance(this).registerReceiver(
+            poiMessageReceiver,
+            IntentFilter("com.sncf.fayowdemo.POI_DETECTED")
+        )
+        Log.d("MainActivity", "📡 BroadcastReceiver ENREGISTRÉ pour POI_DETECTED")
+
+        // 3. Initialisation Firebase
         Firebase.app
         auth = Firebase.auth
         resetFirebaseState()
-
         poiManager = PoiManager(firestore, auth)
         supportActionBar?.hide()
 
-        // 2. Initialisation du moteur Text-to-Speech
-        textToSpeech = TextToSpeech(this) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                val result = textToSpeech.setLanguage(Locale.FRENCH)
-                if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                    Log.e(
-                        "TTS",
-                        "La langue (Français) n'est pas supportée ou les données sont manquantes."
-                    )
-                    val installIntent = Intent()
-                    installIntent.action = TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA
-                    startActivity(installIntent)
-                    Toast.makeText(
-                        this,
-                        "Veuillez installer les données vocales Françaises pour la synthèse vocale.",
-                        Toast.LENGTH_LONG
-                    ).show()
-                } else {
-                    Log.d("TTS", "Moteur TTS initialisé en Français.")
-                    isTtsReady = true
-                }
-            } else {
-                Log.e("TTS", "échec de l'initialisation du moteur TTS. Status: $status")
-                Toast.makeText(
-                    this,
-                    "échec de l'initialisation de la synthèse vocale.",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-        }
-        textToSpeech.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String) {
-                Log.d("TTS", "Début de la lecture : $utteranceId")
-            }
+        // 4. SUPPRESSION DE L'INITIALISATION DU TTS (plus nécessaire)
+        // textToSpeech = TextToSpeech(this) { ... }  <-- SUPPRIMÉ
+        // textToSpeech.setOnUtteranceProgressListener(...)  <-- SUPPRIMÉ
 
-            override fun onDone(utteranceId: String) {
-                Log.d("TTS", "Fin de la lecture : $utteranceId")
-                runOnUiThread {
-                    if (utteranceId.startsWith("poi_message_")) {
-                        currentDialog?.dismiss()
-                        currentDialog = null
-                        isSpeakingPoi = false
-                        currentPoiId = null
-                        pendingPoi = null
-                    }
-                }
-            }
-
-            @Deprecated("Déprécié, mais doit être implémenté")
-            override fun onError(utteranceId: String) {
-                Log.e("TTS", "Erreur de lecture : $utteranceId")
-                runOnUiThread {
-                    if (utteranceId.startsWith("poi_message_")) {
-                        currentDialog?.dismiss()
-                        currentDialog = null
-                        isSpeakingPoi = false
-                        currentPoiId = null
-                        pendingPoi = null
-                    }
-                }
-            }
-        })
-
-
-
-        // 3. Initialisation client de localisation
+        // 5. Initialisation client de localisation
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
 
-        // 4. Initialisation des capteurs (si tu les utilises)
+        // 6. Initialisation des capteurs
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         magnetometer = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
 
-
-        // 5. Nettoyage pr ventif des fragments au d marrage (gard  de ton code)
+        // 7. Nettoyage préventif des fragments
         if (savedInstanceState != null) {
             val fragment = supportFragmentManager.findFragmentById(R.id.map)
             if (fragment != null) {
-                Log.d(
-                    "ONCREATE",
-                    "?? Fragment de carte trouvé dans savedInstanceState, suppression préventive."
-                )
+                Log.d("ONCREATE", "Fragment de carte trouvé dans savedInstanceState, suppression préventive.")
                 supportFragmentManager.beginTransaction().remove(fragment).commitAllowingStateLoss()
                 supportFragmentManager.executePendingTransactions()
             }
         }
 
-        // 6. Charger les POIs d j  d clench s
+        // 8. Charger les POIs déjà déclenchés
         chargerPoisDeclenches()
 
-        // 7. V rifie si l'utilisateur est d j  connect  et g re l'UI en cons quence
+        // 9. Vérifie si l'utilisateur est déjà connecté
         val currentUser = auth.currentUser
-        if (currentUser != null) {
+        if (currentUser != null && currentUser.isEmailVerified) {
             Log.d("AUTH", "Utilisateur déjà connecté: ${currentUser.email}")
             isAuthenticated = true
-
-            // ? Nettoyer les fragments existants AVANT de charger la vue
             val existingFragment = supportFragmentManager.findFragmentById(R.id.map)
             if (existingFragment != null) {
-                Log.d("ONCREATE", "?? Fragment existant détecté, suppression...")
+                Log.d("ONCREATE", "Fragment existant détecté, suppression...")
                 supportFragmentManager.beginTransaction()
                     .remove(existingFragment)
-                    .commitNowAllowingStateLoss() // commitNow pour ex cution imm diate
+                    .commitNowAllowingStateLoss()
             }
-
-            // ? Charger la vue principale
             setContentView(R.layout.activity_main)
-
-            // ? Initialiser la carte et les boutons
             initializeMapView()
-
         } else {
             isAuthenticated = false
+            auth.signOut()
             setContent {
                 FayowDemoTheme {
                     val authActions = object : AuthActions {
                         override fun onSignUp(email: String, password_input: String) {
                             signUpUser(email, password_input)
                         }
-
                         override fun onSignIn(email: String, password_input: String) {
                             signInUser(email, password_input)
                         }
@@ -790,77 +898,165 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         }
     }
 
-    // --- 2. AJOUTE ONSTART (juste apr s onCreate) ---
+    // --- 2. AJOUTE ONSTART (juste après onCreate) ---
     override fun onStart() {
         super.onStart()
-        // Enregistre le receiver pour  couter les POIs lus
-        val filter = IntentFilter("com.sncf.fayow.POI_LU")
-        LocalBroadcastManager.getInstance(this).registerReceiver(poiUpdateReceiver, filter)
-    }
+        Log.d("MainActivity", "onStart appelé")
 
+        LocalBroadcastManager.getInstance(this).apply {
+            // Enregistre tous les receivers nécessaires
+            registerReceiver(poiMessageReceiver, IntentFilter("com.sncf.fayowdemo.POI_DETECTED"))
+            registerReceiver(ttsStartReceiver, IntentFilter("com.sncf.fayowdemo.TTS_STARTED"))
+            registerReceiver(ttsDoneReceiver, IntentFilter("com.sncf.fayowdemo.TTS_DONE"))
+            registerReceiver(ttsErrorReceiver, IntentFilter("com.sncf.fayowdemo.TTS_ERROR"))
+            registerReceiver(poiUpdateReceiver, IntentFilter("com.sncf.fayow.POI_LU"))
+            registerReceiver(locationUpdateReceiver, IntentFilter("com.sncf.fayow.LOCATION_UPDATE"))
+            registerReceiver(locationErrorReceiver, IntentFilter("com.sncf.fayowdemo.LOCATION_ERROR"))
+        }
+    }
     // --- 3. AJOUTE ONSTOP (apr s onStart) ---
     override fun onStop() {
         super.onStop()
-        // D senregistre le receiver pour  viter les fuites
-        LocalBroadcastManager.getInstance(this).unregisterReceiver(poiUpdateReceiver)
-    }
+        Log.d("MainActivity", "⏸️ onStop appelé")
 
+        LocalBroadcastManager.getInstance(this).apply {
+            // Désenregistre les receivers non critiques
+            unregisterReceiver(ttsStartReceiver)
+            unregisterReceiver(ttsDoneReceiver)
+            unregisterReceiver(ttsErrorReceiver)
+            unregisterReceiver(locationErrorReceiver)
+            unregisterReceiver(locationUpdateReceiver)
+
+            // ✅ Garde poiMessageReceiver et poiUpdateReceiver enregistrés pour l'arrière-plan
+        }
+        Log.d("MainActivity", "📡 Receivers non critiques désenregistrés (poiMessageReceiver et poiUpdateReceiver restent actifs)")
+    }
     private fun resetFirebaseState() {
-        android.util.Log.d("AUTH", "?? R initialisation de l'état Firebase")
+        Log.d("AUTH", "?? R initialisation de l'état Firebase")
         auth = Firebase.auth
 
         firestore.clearPersistence()
             .addOnSuccessListener {
-                android.util.Log.d("AUTH", "Cache Firestore nettoyé")
+                Log.d("AUTH", "Cache Firestore nettoyé")
             }
             .addOnFailureListener { e ->
-                android.util.Log.e("AUTH", "Erreur nettoyage cache: ${e.message}")
+                Log.e("AUTH", "Erreur nettoyage cache: ${e.message}")
             }
         isAuthenticated = false
         isModerator = false
     }
+    override fun onDestroy() {
+        super.onDestroy()
+        Log.d("MainActivity", "🧹 onDestroy appelé")
 
+        // ✅ Ferme tous les pop-ups ouverts
+        currentDialog?.dismiss()
+        currentDialog = null
+
+        // ✅ Annule tous les timeouts en attente
+        timeoutHandler.removeCallbacksAndMessages(null)
+
+        // ✅ Désenregistre TOUS les BroadcastReceivers (une seule fois par receiver)
+        try {
+            LocalBroadcastManager.getInstance(this).apply {
+                unregisterReceiver(poiMessageReceiver)
+                unregisterReceiver(ttsStartReceiver)
+                unregisterReceiver(ttsDoneReceiver)
+                unregisterReceiver(ttsErrorReceiver)
+                unregisterReceiver(locationErrorReceiver)
+                unregisterReceiver(poiUpdateReceiver)
+                unregisterReceiver(locationUpdateReceiver)
+            }
+        } catch (e: IllegalArgumentException) {
+            Log.e("MainActivity", "Erreur lors du désenregistrement des receivers", e)
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Erreur inattendue lors du nettoyage", e)
+        }
+
+        // ✅ Arrête le LocationService
+        try {
+            val serviceIntent = Intent(this, LocationService::class.java)
+            stopService(serviceIntent)
+            Log.d("MainActivity", "LocationService arrêté")
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Erreur lors de l'arrêt du LocationService", e)
+        }
+
+        // ✅ Réinitialise les flags de traitement
+        isProcessingQueue = false
+        currentUtteranceId = null
+        poiMessageQueue.clear()
+    }
     private fun checkIfModerator() {
         val moderatorEmails = listOf(
             "marc.paradinas@gmail.com",
             "marc.paradinas@wanadoo.fr"
         )
-        android.util.Log.d("MODERATION", "===== D BUT CHECK MODERATOR =====")
+        Log.d("MODERATION", "===== D BUT CHECK MODERATOR =====")
         val email = auth.currentUser?.email
-        android.util.Log.d("MODERATION", "Email actuel: $email")
-        android.util.Log.d("MODERATION", "Liste modérateurs: $moderatorEmails")
+        Log.d("MODERATION", "Email actuel: $email")
+        Log.d("MODERATION", "Liste modérateurs: $moderatorEmails")
 
         isModerator = email != null && moderatorEmails.contains(email)
-        android.util.Log.d("MODERATION", "isModerator: $isModerator")
+        Log.d("MODERATION", "isModerator: $isModerator")
         val btnModeration = findViewById<Button>(R.id.btnModeration)
         if (btnModeration != null) {
             btnModeration.visibility = if (isModerator) View.VISIBLE else View.GONE
-            android.util.Log.d("MODERATION", "Bouton modération visible: ${btnModeration.visibility == View.VISIBLE}")
+            Log.d("MODERATION", "Bouton modération visible: ${btnModeration.visibility == View.VISIBLE}")
         } else {
-            android.util.Log.e("MODERATION", "Bouton modération non trouvé !")
+            Log.e("MODERATION", "Bouton modération non trouvé !")
         }
-        android.util.Log.d("MODERATION", "===== FIN CHECK MODERATOR =====")
+        Log.d("MODERATION", "===== FIN CHECK MODERATOR =====")
     }
 
     private fun rafraichirCarte(location: Location?) {
-        android.util.Log.d("CARTE", "?? rafraichirCarte appelé")
+        Log.d("CARTE", "?? rafraichirCarte appelé")
         if (!::mMap.isInitialized) return
         mMap.clear()
         locationMarker = null
+        //log carte
+        Log.d("CARTE", "=== Début rafraîchissement carte ===")
+        Log.d("CARTE", "| Nombre total de POIs: ${pointsInteret.size}")
+        Log.d("CARTE", "| POIs lus (VALIDATED): ${poisLusIds.size}")
+        Log.d("CARTE", "| POIs déjà déclenchés: ${pointsDejaDeclenches.size}")
+        Log.d("CARTE", "=== Liste des POIs ===")
+        pointsInteret.forEach { poi ->
+            Log.d("CARTE",
+                "| POI ${poi.id} | Status: ${poi.status} | Lu: ${poisLusIds.contains(poi.id)} | " +
+                        "Déclenché: ${pointsDejaDeclenches.contains(poi.id)} | " +
+                        "Position: (${poi.position.latitude}, ${poi.position.longitude})"
+            )
+        }
         for (poi in pointsInteret) {
 
-            // ? Ne pas afficher les POIs VALIDATED d j  lus
-            //    mais laisser visibles les PROPOSED et INITIATED m me s'ils sont "lus"
+            // ? Ne pas afficher les POIs VALIDATED déjà lus
+            //    mais laisser visibles les PROPOSED et INITIATED même s'ils sont "lus"
             if (poi.status == PoiStatus.VALIDATED && poisLusIds.contains(poi.id)) {
                 continue
             }
+
 
             val shouldDisplay = when (poi.status) {
                 PoiStatus.VALIDATED -> !pointsDejaDeclenches.contains(poi.id)
                 PoiStatus.PROPOSED  -> true   // ? cercle vert toujours visible
                 PoiStatus.INITIATED -> true   // ? cercle orange toujours visible
             }
-
+// logs carte
+            Log.d("CARTE",
+                "[FILTRE] POI ${poi.id} | Status: ${poi.status} | " +
+                        "Affichage: ${shouldDisplay} | " +
+                        "Raison: ${if (!shouldDisplay) when {
+                            poi.status == PoiStatus.VALIDATED && poisLusIds.contains(poi.id) -> "VALIDATED + lu"
+                            poi.status == PoiStatus.VALIDATED && pointsDejaDeclenches.contains(poi.id) -> "VALIDATED + déjà déclenché"
+                            else -> "Inconnue"
+                        } else "OK"}"
+            )
+// logs carte
+            Log.d("CARTE",
+                ("| POI ${poi.id} | Status: ${poi.status} | Lu: ${poisLusIds.contains(poi.id)} | " +
+                        "Déclenché: ${pointsDejaDeclenches.contains(poi.id)} | " +
+                        "Position: (${poi.position.latitude}, ${poi.position.longitude})")
+            )
             if (shouldDisplay) {
                 val (strokeColor, fillColor) = when (poi.status) {
                     PoiStatus.VALIDATED -> Pair(
@@ -887,7 +1083,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                         .clickable(poi.status == PoiStatus.INITIATED) // ? Clickable si brouillon
                 )
 
-                // ? Stocker l'association cercle ? POI pour g rer les clics
+                // ? Stocker l'association cercle ? POI pour gérer les clics
                 circle.tag = poi.id
                 // --- STOCKAGE DU CERCLE DANS LA MAP ---
                 poiCircles[poi.id] = circle
@@ -906,7 +1102,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             }
         }
         location?.let { loc ->
-            android.util.Log.d("CARTE", "?? Recréation du marqueur utilisateur")
+            Log.d("CARTE", "?? Recréation du marqueur utilisateur")
             updateLocationMarker(loc)
         }
     }
@@ -925,16 +1121,16 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 batch.commit()
                     .addOnSuccessListener {
                         poisLusIds.clear()
-                        Log.d("POI", "?? Tous les POIs lus ont  t  r initialis s pour $uid")
+                        Log.d("POI", "?? Tous les POIs lus ont été réinitialisés pour $uid")
                         onComplete()
                     }
                     .addOnFailureListener { e ->
-                        Log.e("POI", "Erreur lors de la r initialisation des POIs lus: ${e.message}")
+                        Log.e("POI", "Erreur lors de la réinitialisation des POIs lus: ${e.message}")
                         onComplete()
                     }
             }
             .addOnFailureListener { e ->
-                Log.e("POI", "Erreur lors de la r cup ration des POIs lus: ${e.message}")
+                Log.e("POI", "Erreur lors de la récupération des POIs lus: ${e.message}")
                 onComplete()
             }
     }
@@ -942,55 +1138,39 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     @RequiresApi(Build.VERSION_CODES.CUPCAKE)
     private fun playPendingPoi(location: Location) {
         val poi = pendingPoi ?: return
-        // ? NOUVEAU : V rifie si le POI a d j   t  lu
         if (poisLusIds.contains(poi.id)) {
-            Log.d("MainActivity", "POI ${poi.id} déjà lu, ignoré dans playPendingPoi")
-            pendingPoi = null  // ? ON VIDE ICI car onDone() ne sera jamais appel
+            Log.d("MainActivity", "POI ${poi.id} déjà lu, ignoré")
+            pendingPoi = null
             return
         }
-        // ? 1. Ta logique existante (d clenchement,  tat, UI)
+
         pointsDejaDeclenches.add(poi.id)
         sauvegarderPoisDeclenches()
         rafraichirCarte(location)
         isSpeakingPoi = true
         currentPoiId = poi.id
 
-        // ? 2. Ta pop-up existante
+        // ✅ Affiche le pop-up
         currentDialog = AlertDialog.Builder(this)
             .setTitle("Information")
             .setMessage(poi.message)
-            .setPositiveButton("OK", null)
+            .setPositiveButton("OK") { dialog, _ -> dialog.dismiss() }
             .setOnDismissListener {
                 currentDialog = null
+                isSpeakingPoi = false
             }
             .create()
         currentDialog?.show()
 
-        // ? 3. Ton annonce vocale existante
-        val utteranceId = "poi_message_${poi.id}"
-        textToSpeech.speak(
-            poi.message,
-            TextToSpeech.QUEUE_FLUSH,
-            null,
-            utteranceId
-        )
+        // ✅ Utilise QUEUE_ADD pour éviter les interruptions
+        //val utteranceId = "poi_message_${poi.id}"
+        //textToSpeech.speak(poi.message, TextToSpeech.QUEUE_ADD, null, utteranceId)
 
-        // ? 4. NOUVEAU : Marque le POI comme "lu" APRES avoir lanc  l'annonce
-        //    (mais sans attendre la fin de la lecture)
+        // ✅ Marque comme lu après la lecture
         val currentUid = auth.currentUser?.uid
-        Log.d("DEBUG_UID", "UID actuel : $currentUid") //   placer avant l'appel   marquerPoiCommeLu()
-        if (currentUid != null && poi.status == PoiStatus.VALIDATED && !poisLusIds.contains(poi.id)) {
-            marquerPoiCommeLu(currentUid, poi.id)  // ? Seuls les violets (VALIDATED) sont marqu s comme lus
-            Log.d("POI", "?? POI ${poi.id} marqué comme lu après annonce vocale")
-        } else if (currentUid == null) {
-            Log.d("POI", "?? Utilisateur non connecté ? POI ${poi.id} non marqué comme lu")
-
-        } else {
-            Log.d("POI", "POI déjà lu ou non VALIDATED (PROPOSED/INITIATED), ignoré")  //
+        if (currentUid != null && poi.status == PoiStatus.VALIDATED) {
+            marquerPoiCommeLu(currentUid, poi.id)
         }
-
-        // ? 5. Ton log existant (que tu m'as mentionn )
-        Log.d("TTS", "Lecture du message pour POI ${poi.id} lancée avec utteranceId: $utteranceId")
     }
 
     /*
@@ -1019,27 +1199,34 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             null,
             utteranceId
         )
-        android.util.Log.d("TTS", "Lecture du message : ${poi.message}")
+        Log.d("TTS", "Lecture du message : ${poi.message}")
     }
 */
     private fun verifierPointsInteret(location: Location) {
+// logs carte
+        Log.d("MainActivity", "=== Vérification POIs (${pointsInteret.size}) ===")
+        Log.d("MainActivity", "| Position utilisateur: (${location.latitude}, ${location.longitude})")
+        Log.d("MainActivity", "| POIs lus (Firestore): ${poisLusIds.size}")
+        Log.d("MainActivity", "| Lecture en cours: $isSpeakingPoi | POI en attente: ${pendingPoi?.id}")
         if (!poisLusLoaded) {
-            // "poisLusIds pas encore charg , on ne d clenche rien"
+            // "poisLusIds pas encore chargé, on ne déclenche rien"
             return
         }
         val currentLatLng = LatLng(location.latitude, location.longitude)
         var poiFound = false
         for (poi in pointsInteret) {
-// ? Jamais de d clenchement auto pour les brouillons
-            if (poi.status == PoiStatus.INITIATED) continue
+// ? Jamais de déclenchement auto pour les brouillons
 
+            if (poi.status == PoiStatus.INITIATED) continue
+            Log.d("MainActivity", "[EXCLU] POI ${poi.id} ignoré (INITIATED, brouillon)")
 // ? On ne bloque par poisLusIds que les VALIDATED
             if (poi.status == PoiStatus.VALIDATED && poisLusIds.contains(poi.id)) continue
-
-            // ? NOUVEAU : V rifie aussi si le POI est dans poisLusIds (Firestore)
+            Log.d("MainActivity", "[EXCLU] POI ${poi.id} ignoré (VALIDATED + lu)")
+            // ? NOUVEAU : Vérifie aussi si le POI est dans poisLusIds (Firestore)
             if (poisLusIds.contains(poi.id)) {
                 Log.d("MainActivity", "POI ${poi.id} d j  lu (depuis Firestore), ignor ")
                 continue
+                Log.d("MainActivity", "[EXCLU] POI ${poi.id} ignoré (lu, même non VALIDATED)")
             }
 
             val results = FloatArray(1)
@@ -1049,7 +1236,14 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 results
             )
             val distanceEnMetres = results[0]
+            // logs carte
+            Log.d("MainActivity",
+                "[CHECK] POI ${poi.id} | Status: ${poi.status} | " +
+                        "Lu (Firestore): ${poisLusIds.contains(poi.id)} | " +
+                        "Distance: ${"%.2f".format(distanceEnMetres)}m"
+            )
             if (distanceEnMetres <= 20f) {
+                Log.d("MainActivity", "[DECLENCHE] POI ${poi.id} déclenché (distance: ${"%.2f".format(distanceEnMetres)}m)")
                 poiFound = true
                 if (isSpeakingPoi) {
                     Log.d("MainActivity", "Annonce vocale déjà en cours, POI ${poi.id} ignor ")
@@ -1065,7 +1259,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 break
             }
         }
-        // ? Si aucun POI n'est trouv  et qu'un POI est en attente,
+        // ? Si aucun POI n'est trouvé et qu'un POI est en attente,
         // cela signifie que l'utilisateur est sorti de la zone avant la lecture
         if (!poiFound && pendingPoi != null) {
             Log.d("MainActivity", "Utilisateur sorti de la zone, pendingPoi annulé")
@@ -1116,11 +1310,11 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                     // ? Charger la vue principale
                     setContentView(R.layout.activity_main)
 
-                    // ? Initialiser la carte avec un l ger d lai
+                    // ? Initialiser la carte avec un léger délai
                     Handler(Looper.getMainLooper()).postDelayed({
                         initializeMapView()
 
-                        // ? D marrer le service de localisation si les permissions sont OK
+                        // ? Démarrer le service de localisation si les permissions sont OK
                         if (hasFineLocationPermission()) {
                             if (hasBackgroundLocationPermission()) {
                                 startLocationService()
@@ -1135,7 +1329,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                     val errorMessage = when (task.exception) {
                         is com.google.firebase.auth.FirebaseAuthInvalidUserException -> "Cet utilisateur n'existe pas."
                         is com.google.firebase.auth.FirebaseAuthInvalidCredentialsException -> "Mot de passe incorrect."
-                        is com.google.firebase.FirebaseNetworkException -> "Problème de connexion r seau."
+                        is com.google.firebase.FirebaseNetworkException -> "Problème de connexion réseau."
                         else -> "Erreur de connexion : ${task.exception?.message ?: "Vérifiez vos identifiants."}"
                     }
                     Log.e("AUTH", "? Erreur connexion: ${task.exception?.message}")
@@ -1155,7 +1349,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         auth.createUserWithEmailAndPassword(email, password)
             .addOnCompleteListener(this) { task ->
                 if (task.isSuccessful) {
-                    Log.d("AUTH", "? Compte cr   pour ${auth.currentUser?.email}")
+                    Log.d("AUTH", "? Compte créé pour ${auth.currentUser?.email}")
                     Toast.makeText(this, "Compte créé avec succès", Toast.LENGTH_SHORT).show()
                     isAuthenticated = true
 
@@ -1171,11 +1365,11 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                     // ? Charger la vue principale
                     setContentView(R.layout.activity_main)
 
-                    // ? Initialiser la carte avec un l ger d lai
+                    // ? Initialiser la carte avec un léger délai
                     Handler(Looper.getMainLooper()).postDelayed({
                         initializeMapView()
 
-                        // ? D marrer le service de localisation si les permissions sont OK
+                        // ? Démarrer le service de localisation si les permissions sont OK
                         if (hasFineLocationPermission()) {
                             if (hasBackgroundLocationPermission()) {
                                 startLocationService()
@@ -1203,7 +1397,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     @RequiresApi(Build.VERSION_CODES.CUPCAKE)
     private fun initializeMapView() {
         try {
-            // ? Timeout de s curit  pour d tecter les initialisations bloqu es
+            // ? Timeout de sécurité pour détecter les initialisations bloquées
             val timeoutHandler = Handler(Looper.getMainLooper())
             val timeoutRunnable = Runnable {
                 Log.e("INIT", "?? Timeout : Initialisation trop longue")
@@ -1227,15 +1421,15 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             }
             timeoutHandler.postDelayed(timeoutRunnable, 5000) // 5 secondes de timeout
 
-            // ? Charger d'abord les POIs d j  lus par l'utilisateur
+            // ? Charger d'abord les POIs déjà lus par l'utilisateur
             val currentUid = auth.currentUser?.uid
             if (currentUid != null) {
                 chargerPoisLus(currentUid) {
-                    // ? Une fois les POIs lus charg s, on charge tous les POIs
+                    // ? Une fois les POIs lus chargés, on charge tous les POIs
                     chargerPointsInteret()
                 }
             } else {
-                // ? Pas connect  ? charge les POIs normalement
+                // ? Pas connecté  ? charge les POIs normalement
                 chargerPointsInteret()
             }
 
@@ -1252,7 +1446,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 else Toast.makeText(this, "Accès réservé aux modérateurs", Toast.LENGTH_SHORT).show()
             }
 
-            // Bouton R afficher tous les POIs
+            // Bouton Réafficher tous les POIs
             val btnReafficher = findViewById<Button>(R.id.btnReafficher)
             btnReafficher?.setOnClickListener {
                 AlertDialog.Builder(this)
@@ -1272,15 +1466,15 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             // Bouton D connexion
             val btnLogout = findViewById<Button>(R.id.btnLogout)
             btnLogout?.setOnClickListener {
-                Log.d("AUTH", "?? D connexion demandée")
+                Log.d("AUTH", "?? Déconnexion demandée")
 
-                // Arr ter le service de localisation
+                // Arrêter le service de localisation
                 stopLocationService()
 
-                // Arr ter les mises   jour de localisation
+                // Arrêter les mises à jour de localisation
                 stopLocationUpdates()
 
-                // Nettoyage des donn es
+                // Nettoyage des données
                 pointsInteret.clear()
                 pointsDejaDeclenches.clear()
                 sauvegarderPoisDeclenches()
@@ -1303,7 +1497,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 isAuthenticated = false
                 isModerator = false
 
-                // Retour   l' cran d'authentification
+                // Retour à l'écran d'authentification
                 try {
                     setContent {
                         FayowDemoTheme {
@@ -1327,16 +1521,16 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 }
             }
 
-            // ? V rifier si l'utilisateur est mod rateur
+            // ? Vérifier si l'utilisateur est modérateur
             checkIfModerator()
 
-            // ? Initialiser le client de localisation (si pas d j  fait dans onCreate)
+            // ? Initialiser le client de localisation (si pas déjà fait dans onCreate)
             if (!::fusedLocationClient.isInitialized) {
                 fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
                 Log.d("INIT", "?? FusedLocationClient initialisé")
             }
 
-            // ? Initialiser locationRequest (si pas d j  fait)
+            // ? Initialiser locationRequest (si pas déjà fait)
             if (!::locationRequest.isInitialized) {
                 locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 3000L)
                     .setMinUpdateIntervalMillis(1000L)
@@ -1344,7 +1538,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 Log.d("INIT", "?? LocationRequest initialisé")
             }
 
-            // ? Initialiser locationCallback (si pas d j  fait)
+            // ? Initialiser locationCallback (si pas déjà fait)
             if (!::locationCallback.isInitialized) {
                 locationCallback = object : LocationCallback() {
                     override fun onLocationResult(locationResult: LocationResult) {
@@ -1356,7 +1550,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                         Log.d("LOCATION", "? Localisation: Lat=${location.latitude}, Lng=${location.longitude}")
                         currentLocation = location
                         updateLocationMarker(location)
-                        verifierPointsInteret(location)
+                        //verifierPointsInteret(location)
                     }
                 }
                 Log.d("INIT", "?? LocationCallback initialisé")
@@ -1387,60 +1581,74 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     override fun onMapReady(googleMap: GoogleMap) {
         mMap = googleMap
         mMap.uiSettings.isZoomControlsEnabled = true
-        // ? AJOUT : Listener de clic sur les cercles
+
+        // Listener de clic sur les cercles
         mMap.setOnCircleClickListener { circle ->
             val poiId = circle.tag as? String ?: return@setOnCircleClickListener
             val poi = pointsInteret.find { it.id == poiId } ?: return@setOnCircleClickListener
-
             if (poi.status == PoiStatus.INITIATED) {
                 showEditMyPoiDialog(poi)
             }
         }
-        // ? FIN AJOUT
 
         if (!hasFineLocationPermission()) {
-            Log.w("MainActivity", "?? Permission de localisation non accordée dans onMapReady")
-            // ?? Ne redemander QUE si aucune demande n'est en cours
+            Log.w("MainActivity", "Permission de localisation non accordée dans onMapReady")
             if (!isRequestingPermissions) {
                 requestFineLocationPermission()
             }
             return
         }
-        // ? D sactiver le bouton "Ma position" et la couche de localisation
+
+        // Configuration de la carte
         mMap.isMyLocationEnabled = false
-        googleMap.uiSettings.isMyLocationButtonEnabled = true  // ? Garde le bouton de recentrage
+        googleMap.uiSettings.isMyLocationButtonEnabled = true
         try {
-            googleMap.setMyLocationEnabled(false)  // D sactive d finitivement le marqueur bleu
+            googleMap.setMyLocationEnabled(false)
         } catch (e: SecurityException) {
             Log.e("MAP", "Erreur permission localisation", e)
         }
 
-        // ? Charger les POIs depuis Firestore
+        // Charger les POIs depuis Firestore
         chargerPointsInteret()
 
-        // ? R cup rer la derni re position connue et centrer la carte
+        // Récupérer la dernière position connue et centrer la carte
         fusedLocationClient.lastLocation.addOnSuccessListener { location ->
-            location?.let {
-                currentLocation = it
-                updateLocationMarker(it)
-                rafraichirCarte(it)
-                // Centrer la cam ra sur la position actuelle
+            location?.let { loc ->
+                currentLocation = loc
+                updateLocationMarker(loc)
+                rafraichirCarte(loc)
+
+                // ✅ 1. Demande une vérification forcée des POIs via LocationService
+                val forceCheckIntent = Intent("com.sncf.fayow.FORCE_CHECK_POIS").apply {
+                    putExtra("latitude", loc.latitude)
+                    putExtra("longitude", loc.longitude)
+                }
+                LocalBroadcastManager.getInstance(this).sendBroadcast(forceCheckIntent)
+                Log.d("MainActivity", "Demande de vérification forcée des POIs envoyée à LocationService")
+
+                // ✅ 2. Vérification locale en backup (après un délai pour laisser le temps à LocationService)
+                Handler(Looper.getMainLooper()).postDelayed({
+                    if (!isSpeakingPoi) {  // ✅ Vérifie qu'aucun POI n'est déjà en cours de lecture
+                        verifierPointsInteret(loc)
+                        Log.d("MainActivity", "Vérification locale des POIs en backup")
+                    }
+                }, 2000)  // Délai de 2 secondes
+
+                // Centrer la caméra sur la position actuelle
                 mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(
-                    LatLng(it.latitude, it.longitude),
+                    LatLng(loc.latitude, loc.longitude),
                     15f
                 ))
-                Log.d("MainActivity", "?? Carte centr e sur : ${it.latitude}, ${it.longitude}")
+                Log.d("MainActivity", "Carte centrée sur : ${loc.latitude}, ${loc.longitude}")
             } ?: run {
-                Log.w("MainActivity", "?? Aucune position connue dans lastLocation")
+                Log.w("MainActivity", "Aucune position connue dans lastLocation")
             }
         }
 
-        // ? D marrer les mises   jour GPS en temps r el
+        // Démarrer les mises à jour GPS en temps réel
         startLocationUpdates()
-
-        Log.d("MainActivity", "? Carte Google Maps prête et configurée")
+        Log.d("MainActivity", "Carte Google Maps prête et configurée")
     }
-
     private fun onAddPoiClicked() {
         val location = currentLocation
         if (location == null) {
@@ -1569,7 +1777,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         val editMessage = dialogView.findViewById<EditText>(R.id.editPoiMessage)
         editMessage.setText(poi.message)
 
-        // Masquer la checkbox du mod rateur (on n'en a pas besoin ici)
+        // Masquer la checkbox du modérateur (on n'en a pas besoin ici)
         val checkApproved = dialogView.findViewById<CheckBox>(R.id.checkApproved)
         checkApproved.visibility = View.GONE
 
@@ -1581,14 +1789,14 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 firestore.collection("pois").document(poi.id)
                     .update("message", newMessage)
                     .addOnSuccessListener {
-                        Toast.makeText(this, "Brouillon mis   jour", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, "Brouillon mis à jour", Toast.LENGTH_SHORT).show()
                         chargerPointsInteret()
                     }
                     .addOnFailureListener { e ->
                         Toast.makeText(this, "Erreur: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
             }
-            .setNeutralButton("Proposer   la mod ration") { _, _ ->
+            .setNeutralButton("Proposer à la modération") { _, _ ->
                 val newMessage = editMessage.text.toString().trim()
                 firestore.collection("pois").document(poi.id)
                     .update(mapOf(
@@ -1596,7 +1804,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                         "status" to "proposed"
                     ))
                     .addOnSuccessListener {
-                        Toast.makeText(this, "POI propos    la mod ration !", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, "POI proposé à la modération !", Toast.LENGTH_SHORT).show()
                         chargerPointsInteret()
                     }
                     .addOnFailureListener { e ->
@@ -1613,7 +1821,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             .get()
             .addOnSuccessListener { result ->
                 if (result.isEmpty) {
-                    Toast.makeText(this, "Aucun point en attente de mod ration", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Aucun point en attente de modération", Toast.LENGTH_SHORT).show()
                     return@addOnSuccessListener
                 }
                 val pendingPois = result.documents.map { doc ->
@@ -1626,7 +1834,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                     "${index + 1}. ${poi.message.take(40)}"
                 }.toTypedArray()
                 AlertDialog.Builder(this)
-                    .setTitle("Points   mod rer")
+                    .setTitle("Points à modérer")
                     .setItems(titles) { _, which ->
                         showPoiEditDialog(pendingPois[which])
                     }
@@ -1647,7 +1855,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         checkApproved.text = "Valider ce POI"
 
         AlertDialog.Builder(this)
-            .setTitle("Mod rer POI")
+            .setTitle("Modérer POI")
             .setView(dialogView)
             .setPositiveButton("Enregistrer") { _, _ ->
                 val newMessage = editMessage.text.toString().trim()
@@ -1665,7 +1873,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 firestore.collection("pois").document(poi.id)
                     .update(updates)
                     .addOnSuccessListener {
-                        val msg = if (validated) "POI valid  !" else "POI mis   jour"
+                        val msg = if (validated) "POI validé !" else "POI mis à jour"
                         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
                         if (validated) chargerPointsInteret()
                     }
@@ -1679,53 +1887,50 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
     @RequiresPermission(anyOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION])
     private fun startLocationUpdates() {
-        // ? V rifier la permission avec la nouvelle fonction
+        // ? Vérifier la permission avec la nouvelle fonction
         if (!hasFineLocationPermission()) {
             Log.w("LOCATION", "?? Permission de localisation manquante.")
             return
         }
 
         try {
-            // ? Initialiser locationRequest si ce n'est pas d j  fait
+            // ? Initialiser locationRequest si ce n'est pas déjà fait
             if (!::locationRequest.isInitialized) {
                 locationRequest = LocationRequest.Builder(
                     Priority.PRIORITY_HIGH_ACCURACY,
-                    3000L // Mise   jour toutes les 3 secondes
+                    3000L // Mise à jour toutes les 3 secondes
                 )
-                    .setMinUpdateIntervalMillis(1000L) // Minimum 1 seconde entre chaque mise   jour
+                    .setMinUpdateIntervalMillis(1000L) // Minimum 1 seconde entre chaque mise à jour
                     .build()
 
-                Log.d("LOCATION", "?? LocationRequest initialis ")
+                Log.d("LOCATION", "?? LocationRequest initialisé")
             }
 
-            // ? Initialiser locationCallback si ce n'est pas d j  fait
+            // ? Initialiser locationCallback si ce n'est pas déjà fait
             if (!::locationCallback.isInitialized) {
                 locationCallback = object : LocationCallback() {
                     override fun onLocationResult(locationResult: LocationResult) {
                         locationResult.lastLocation?.let { location ->
                             currentLocation = location
                             updateLocationMarker(location)
-                            Log.d("LOCATION", "?? Position mise   jour : ${location.latitude}, ${location.longitude}")
-
-                            // ? OPTIONNEL : V rifier les POIs proches (si tu veux que MainActivity le fasse aussi)
-                            // verifierProximitePois(location)
-                        }
+                            Log.d("LOCATION", "?? Position mise à jour : ${location.latitude}, ${location.longitude}")
+                       }
                     }
                 }
-                Log.d("LOCATION", "?? LocationCallback initialis ")
+                Log.d("LOCATION", "?? LocationCallback initialisé")
             }
 
-            // ? Arr ter les mises   jour existantes avant d'en d marrer de nouvelles
+            // ? Arrêter les mises à jour existantes avant d'en démarrer de nouvelles
             fusedLocationClient.removeLocationUpdates(locationCallback)
 
-            // ? D marrer les nouvelles mises   jour
+            // ? Démarrer les nouvelles mises à jour
             fusedLocationClient.requestLocationUpdates(
                 locationRequest,
                 locationCallback,
                 Looper.getMainLooper()
             )
 
-            Log.d("LOCATION", "?? Mises   jour de localisation d marr es.")
+            Log.d("LOCATION", "?? Mises à jour de localisation démarrées.")
         } catch (e: SecurityException) {
             Log.e("LOCATION", "? Erreur de permission : ${e.message}")
         }
@@ -1738,14 +1943,14 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     private fun updateLocationMarker(location: Location) {
         // ? V rification que la carte est initialis e
         if (!::mMap.isInitialized) {
-            android.util.Log.e("LOCATION", "? mMap non initialis , impossible de cr er/mettre   jour le marqueur.")
+            Log.e("LOCATION", "? mMap non initialisé, impossible de créer/mettre à jour le marqueur.")
             return
         }
         val currentLatLng = LatLng(location.latitude, location.longitude)
         val customMarkerIcon = bitmapDescriptorFromVector(this, R.drawable.outline_arrow_circle_up_24)
         if (locationMarker == null) {
             // Cr ation du marqueur
-            android.util.Log.d("LOCATION", "? Cr ation du marqueur de localisation   Lat=${location.latitude}, Lng=${location.longitude}")
+            Log.d("LOCATION", "? Création du marqueur de localisation à Lat=${location.latitude}, Lng=${location.longitude}")
             locationMarker = mMap.addMarker(
                 MarkerOptions()
                     .position(currentLatLng)
@@ -1756,17 +1961,17 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                     .rotation(currentAzimuth)
                     .flat(true)
             )
-            // D placer la cam ra vers la position initiale
+            // Déplacer la caméra vers la position initiale
             mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(currentLatLng, 16f))
-            android.util.Log.d("LOCATION", "?? Cam ra d plac e vers la position initiale.")
+            Log.d("LOCATION", "?? Caméra déplacée vers la position initiale.")
         } else {
             // Mise   jour du marqueur existant
-            android.util.Log.d("LOCATION", "?? Mise   jour du marqueur de localisation   Lat=${location.latitude}, Lng=${location.longitude}")
+            Log.d("LOCATION", "?? Mise à jour du marqueur de localisation à Lat=${location.latitude}, Lng=${location.longitude}")
             locationMarker?.apply {
                 position = currentLatLng
                 rotation = currentAzimuth
             }
-            // Animer la cam ra pour suivre le d placement (optionnel, peut  tre d sactiv  si trop g nant)
+            // Animer la caméra pour suivre le déplacement (optionnel, peut être désactivé si trop gênant)
             mMap.animateCamera(CameraUpdateFactory.newLatLng(currentLatLng))
         }
     }
@@ -1778,7 +1983,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         val uid = auth.currentUser?.uid
         if (uid != null) {
             chargerPoisLus(uid) {
-                // Une fois poisLusIds   jour, on rafra chit la carte
+                // Une fois poisLusIds à jour, on rafraîchit la carte
                 rafraichirCarte(null)
             }
         }
@@ -1787,17 +1992,17 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_UI)
         sensorManager.registerListener(this, magnetometer, SensorManager.SENSOR_DELAY_UI)
 
-        // Si toutes les permissions sont accord es ET authentifi
+        // Si toutes les permissions sont accordées ET authentifiées
         if (hasAllLocationPermissions() && isAuthenticated) {
             startAppFeatures()
         }
-        // ?? Ne redemander que si AUCUNE demande en cours ET pas authentifi
+        // ?? Ne redemander que si AUCUNE demande en cours ET pas authentifié
         else if (!hasFineLocationPermission() && isAuthenticated && !isRequestingPermissions) {
             requestFineLocationPermission()
         }
     }
 
-    // V rifie si le LocationService est d j  en cours d'ex cution
+    // Vérifie si le LocationService est déjà en cours d'exécution
     private fun isLocationServiceRunning(): Boolean {
         val manager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         for (service in manager.getRunningServices(Int.MAX_VALUE)) {
@@ -1811,10 +2016,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     override fun onPause() {
         super.onPause()
 
-        // Arr ter les capteurs
+        // Arrêter les capteurs
         sensorManager.unregisterListener(this)
 
-        // Arr ter les mises   jour de localisation de l'activit  pour  conomiser la batterie
+        // Arrêter les mises à jour de localisation de l'activité pour économiser la batterie
         stopLocationUpdates()
     }
 
