@@ -344,18 +344,11 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
         // Bouton Réafficher
         findViewById<Button>(R.id.btnReafficher)?.setOnClickListener {
-            AlertDialog.Builder(this)
-                .setTitle("Réinitialiser les anecdotes")
-                .setMessage("Voulez-vous vraiment réafficher toutes les anecdotes ?")
-                .setPositiveButton("Oui") { _, _ ->
-                    if (permissionManager.hasFineLocationPermission()) {
-                        reinitialiserPoisDeclenches()
-                    } else {
-                        Toast.makeText(this, "Permission de localisation nécessaire", Toast.LENGTH_SHORT).show()
-                    }
-                }
-                .setNegativeButton("Annuler", null)
-                .show()
+            if (permissionManager.hasFineLocationPermission()) {
+                afficherDialogReafficher()
+            } else {
+                Toast.makeText(this, "Permission de localisation nécessaire", Toast.LENGTH_SHORT).show()
+            }
         }
 
         // Bouton Déconnexion
@@ -570,7 +563,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             Log.d("MainActivity", "POI ${poi.id} PROPOSED — lu en session uniquement")
         }
     }
-
+/*
     @SuppressLint("MissingPermission")
     private fun reinitialiserPoisDeclenches() {
         pointsDejaDeclenches.clear()
@@ -595,10 +588,139 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         }
         Toast.makeText(this, "Tous les POIs sont à nouveau disponibles !", Toast.LENGTH_SHORT).show()
     }
+*/
 
+    private fun reafficherParSecteur() {
+        val location = currentLocation ?: run {
+            Toast.makeText(this, "Localisation indisponible", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val rayons = arrayOf("100 mètres", "500 mètres", "1 kilomètre", "5 kilomètres")
+        val rayonsMetres = listOf(100f, 500f, 1000f, 5000f)
+
+        AlertDialog.Builder(this)
+            .setTitle("Choisissez un rayon")
+            .setItems(rayons) { _, which ->
+                val rayon = rayonsMetres[which]
+                // Retirer de pointsDejaDeclenches les POIs dans le rayon choisi
+                val poisDansLeRayon = pointsInteret.filter { poi ->
+                    val results = FloatArray(1)
+                    Location.distanceBetween(
+                        location.latitude, location.longitude,
+                        poi.position.latitude, poi.position.longitude,
+                        results
+                    )
+                    results[0] <= rayon
+                }.map { it.id }.toSet()
+
+                pointsDejaDeclenches.removeAll(poisDansLeRayon)
+                sauvegarderPoisDeclenches()
+
+                if (::mMap.isInitialized) {
+                    mapManager.rafraichirCarte(
+                        mMap, pointsInteret, poisLusIds,
+                        pointsDejaDeclenches, currentLocation, currentAzimuth
+                    )
+                }
+                Toast.makeText(
+                    this,
+                    "${poisDansLeRayon.size} anecdote(s) réaffichée(s) dans ce secteur",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    private fun reafficherDepuisDate() {
+        val uid = authManager.getCurrentUser()?.uid ?: return
+
+        // Proposer des périodes prédéfinies
+        val periodes = arrayOf("Aujourd'hui", "Cette semaine", "Ce mois-ci", "Cette année")
+        val calendar = java.util.Calendar.getInstance()
+
+        AlertDialog.Builder(this)
+            .setTitle("Réafficher depuis...")
+            .setItems(periodes) { _, which ->
+                calendar.time = java.util.Date()
+                when (which) {
+                    0 -> calendar.set(java.util.Calendar.HOUR_OF_DAY, 0)
+                    1 -> calendar.add(java.util.Calendar.DAY_OF_YEAR, -7)
+                    2 -> calendar.add(java.util.Calendar.MONTH, -1)
+                    3 -> calendar.add(java.util.Calendar.YEAR, -1)
+                }
+                val depuis = calendar.time
+
+                poiRepository.chargerPoisLusDepuisDate(uid, depuis,
+                    onSuccess = { ids ->
+                        val avant = pointsDejaDeclenches.size
+                        pointsDejaDeclenches.removeAll(ids)
+                        sauvegarderPoisDeclenches()
+
+                        if (::mMap.isInitialized) {
+                            mapManager.rafraichirCarte(
+                                mMap, pointsInteret, poisLusIds,
+                                pointsDejaDeclenches, currentLocation, currentAzimuth
+                            )
+                        }
+                        val nbReaffiche = avant - pointsDejaDeclenches.size
+                        Toast.makeText(
+                            this,
+                            "$nbReaffiche anecdote(s) réaffichée(s)",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    },
+                    onError = {
+                        Toast.makeText(this, "Erreur : ${it.message}", Toast.LENGTH_SHORT).show()
+                    }
+                )
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    private fun reafficherTout() {
+        AlertDialog.Builder(this)
+            .setTitle("Réafficher toutes les anecdotes")
+            .setMessage("Toutes les anecdotes déjà lues seront réaffichées temporairement. Votre historique de lecture reste conservé.")
+            .setPositiveButton("Confirmer") { _, _ ->
+                pointsDejaDeclenches.clear()
+                sauvegarderPoisDeclenches()
+
+                if (::mMap.isInitialized) {
+                    mapManager.rafraichirCarte(
+                        mMap, pointsInteret, poisLusIds,
+                        pointsDejaDeclenches, currentLocation, currentAzimuth
+                    )
+                }
+                Toast.makeText(this, "Toutes les anecdotes sont réaffichées", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
     // =========================================================================
     // Dialogs POI
     // =========================================================================
+
+    private fun afficherDialogReafficher() {
+        val options = arrayOf(
+            "Réafficher les anecdotes d'un secteur",
+            "Réafficher les anecdotes depuis une date",
+            "Réafficher toutes les anecdotes"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Réafficher des anecdotes")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> reafficherParSecteur()
+                    1 -> reafficherDepuisDate()
+                    2 -> reafficherTout()
+                }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
 
     private fun onAddPoiClicked() {
         val location = currentLocation ?: run {

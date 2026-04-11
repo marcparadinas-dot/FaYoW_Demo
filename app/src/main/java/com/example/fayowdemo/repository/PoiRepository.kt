@@ -9,6 +9,8 @@ import com.google.android.gms.maps.model.LatLng
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
+import java.util.Date
+
 
 class PoiRepository {
 
@@ -174,7 +176,7 @@ class PoiRepository {
     }
 
     /** Supprime tous les POIs lus de Firestore (réinitialisation complète). */
-    fun reinitialiserPoisLus(
+/*    fun reinitialiserPoisLus(
         uid: String,
         onSuccess: () -> Unit,
         onError: (Exception) -> Unit
@@ -195,6 +197,8 @@ class PoiRepository {
             }
             .addOnFailureListener { onError(it) }
     }
+
+ */
 
     // -------------------------------------------------------------------------
     // Création et modification de POIs
@@ -236,6 +240,25 @@ class PoiRepository {
         firestore.collection("pois").document(poiId)
             .update(updates)
             .addOnSuccessListener { onSuccess() }
+            .addOnFailureListener { onError(it) }
+    }
+    /** Récupère les IDs des POIs lus après une date donnée. */
+    fun chargerPoisLusDepuisDate(
+        uid: String,
+        depuis: Date,
+        onSuccess: (Set<String>) -> Unit,
+        onError: (Exception) -> Unit
+    ) {
+        firestore.collection("users")
+            .document(uid)
+            .collection("readPois")
+            .whereGreaterThan("readAt", Timestamp(depuis))
+            .get()
+            .addOnSuccessListener { result ->
+                val ids = result.map { it.id }.toSet()
+                Log.d("PoiRepository", "${ids.size} POIs lus depuis la date demandée")
+                onSuccess(ids)
+            }
             .addOnFailureListener { onError(it) }
     }
 }
