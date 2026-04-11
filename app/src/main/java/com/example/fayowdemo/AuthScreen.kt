@@ -1,6 +1,5 @@
 package com.example.fayowdemo
 
-
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -8,14 +7,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-
+import androidx.compose.foundation.Image
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import com.example.fayowdemo.auth.AuthActions
 
 @Composable
 fun AuthScreen(authActions: AuthActions) {  // ✅ AuthActions est maintenant reconnu
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var isLogin by remember { mutableStateOf(true) }
-
+    Image(
+        painter = painterResource(id = R.drawable.fayow_fond),
+        modifier = Modifier.fillMaxSize(),
+        contentScale = ContentScale.Crop,
+        contentDescription = "Image de Fond FaYoW"
+    )
 
     Column(
         modifier = Modifier
@@ -26,13 +33,12 @@ fun AuthScreen(authActions: AuthActions) {  // ✅ AuthActions est maintenant re
     ) {
         Spacer(modifier = Modifier.height(48.dp))
 
-
         Text(
             text = if (isLogin) "Connexion" else "Inscription",
             style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.inversePrimary ,
             modifier = Modifier.padding(bottom = 32.dp)
         )
-
 
         TextField(
             value = email,
@@ -41,9 +47,7 @@ fun AuthScreen(authActions: AuthActions) {  // ✅ AuthActions est maintenant re
             modifier = Modifier.fillMaxWidth()
         )
 
-
         Spacer(modifier = Modifier.height(8.dp))
-
 
         TextField(
             value = password,
@@ -53,9 +57,7 @@ fun AuthScreen(authActions: AuthActions) {  // ✅ AuthActions est maintenant re
             modifier = Modifier.fillMaxWidth()
         )
 
-
         Spacer(modifier = Modifier.height(16.dp))
-
 
         Button(
             onClick = {
@@ -67,17 +69,23 @@ fun AuthScreen(authActions: AuthActions) {  // ✅ AuthActions est maintenant re
             },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text(if (isLogin) "Se connecter" else "S'inscrire")
+            Text(
+                text = if (isLogin) "Se connecter" else "S'inscrire",
+                style = MaterialTheme.typography.headlineMedium,
+                color = MaterialTheme.colorScheme.inversePrimary
+            )
         }
 
-
         Spacer(modifier = Modifier.height(8.dp))
-
 
         TextButton(
             onClick = { isLogin = !isLogin }
         ) {
-            Text(if (isLogin) "Créer un compte" else "J'ai déjà un compte")
+            Text(
+                text = if (isLogin) "Créer un compte" else "J'ai déjà un compte",
+                style = MaterialTheme.typography.headlineMedium,
+                color = MaterialTheme.colorScheme.inversePrimary
+            )
         }
     }
 }
