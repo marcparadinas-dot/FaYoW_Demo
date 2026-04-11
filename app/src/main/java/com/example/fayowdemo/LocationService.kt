@@ -24,6 +24,7 @@ import com.google.android.gms.location.*
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import java.util.Locale
+import com.example.fayowdemo.model.PoiStatus
 // ? NOUVEAU : Classe pour stocker les données d'un POI
 data class PoiData(
     val latitude: Double,
