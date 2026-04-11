@@ -26,7 +26,6 @@ import androidx.annotation.RequiresApi
 import androidx.annotation.RequiresPermission
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.compose.runtime.*
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.example.fayowdemo.auth.AuthManager
 import com.example.fayowdemo.model.PendingPoi
@@ -41,10 +40,11 @@ import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.OnMapReadyCallback
 import com.google.android.gms.maps.SupportMapFragment
 import com.google.android.gms.maps.model.LatLng
-import com.google.firebase.auth.FirebaseAuth
 import java.util.Locale
 import androidx.activity.compose.setContent
 import com.example.fayowdemo.auth.AuthActions
+import com.example.fayowdemo.service.LocationService
+
 @RequiresApi(Build.VERSION_CODES.CUPCAKE)
 class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListener {
 
