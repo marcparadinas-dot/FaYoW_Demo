@@ -505,6 +505,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             if (poi.status == PoiStatus.INITIATED) continue
             if (poi.status == PoiStatus.VALIDATED && poisLusIds.contains(poi.id)) continue
             if (poisLusIds.contains(poi.id)) continue
+            if (pointsDejaDeclenches.contains(poi.id)) continue  // ← ligne manquante
 
             val results = FloatArray(1)
             Location.distanceBetween(
