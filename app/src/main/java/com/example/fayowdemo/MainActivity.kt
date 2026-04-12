@@ -43,6 +43,7 @@ import com.google.android.gms.maps.model.LatLng
 import java.util.Locale
 import androidx.activity.compose.setContent
 import com.example.fayowdemo.auth.AuthActions
+import com.example.fayowdemo.location.CommuneManager
 import com.example.fayowdemo.service.LocationService
 
 @RequiresApi(Build.VERSION_CODES.CUPCAKE)
@@ -51,7 +52,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     // -------------------------------------------------------------------------
     // Managers
     // -------------------------------------------------------------------------
-
+    private lateinit var communeManager: CommuneManager
     private lateinit var authManager: AuthManager
     private lateinit var permissionManager: PermissionManager
     private lateinit var mapManager: MapManager
@@ -137,7 +138,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
         authManager = AuthManager(this)
         mapManager = MapManager(this)
-
+        communeManager = CommuneManager(this)
+        communeManager.initialiserTts()
         // 2. Callbacks des managers
         configurerCallbacksAuth()
         configurerCallbacksPermissions()
@@ -223,6 +225,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     }
 
     override fun onDestroy() {
+        communeManager.shutdown()
         if (::textToSpeech.isInitialized) {
             textToSpeech.stop()
             textToSpeech.shutdown()
@@ -376,8 +379,18 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 override fun onLocationResult(locationResult: LocationResult) {
                     val location = locationResult.lastLocation ?: return
                     currentLocation = location
-                    mapManager.updateLocationMarker(mMap, location, currentAzimuth)
+                    if (::mMap.isInitialized) {
+                        mapManager.updateLocationMarker(mMap, location, currentAzimuth)
+                    }
                     verifierPointsInteret(location)
+
+                    // Détection de commune ← ajout
+                    communeManager.verifierCommune(
+                        latitude      = location.latitude,
+                        longitude     = location.longitude,
+                        pointsInteret = pointsInteret,
+                        poisLusIds    = poisLusIds
+                    )
                 }
             }
         }
@@ -877,6 +890,14 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                             mapManager.updateLocationMarker(mMap, location, currentAzimuth)
                         }
                         verifierPointsInteret(location)
+
+                        // Détection de commune ← ajout
+                        communeManager.verifierCommune(
+                            latitude      = location.latitude,
+                            longitude     = location.longitude,
+                            pointsInteret = pointsInteret,
+                            poisLusIds    = poisLusIds
+                        )
                     }
                 }
             }
