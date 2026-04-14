@@ -267,4 +267,9 @@ class CommuneManager(private val context: Context) {
         Log.d("CommuneManager", "Annonce : $message")
         tts?.speak(message, TextToSpeech.QUEUE_ADD, null, "commune_announcement")
     }
+    fun reinitialiser() {
+        communeActuelle = null
+        polygoneActuel = emptyList()
+        Log.d("CommuneManager", "État réinitialisé")
+    }
 }

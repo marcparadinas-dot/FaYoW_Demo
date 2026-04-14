@@ -280,7 +280,9 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
                 && !poisLusIds.contains(poiId)
             ) {
                 Log.d("LocationService", "POI $poiId déclenché")
+                Log.d("FAYOWDEBUG", "Déclenchement POI $poiId | poisLusIds=$poisLusIds | triggeredPois=$triggeredPois") // ← ici
                 speak(poiData.message)
+
                 triggeredPois.add(poiId)
 
                 // On marque comme lu uniquement les POIs VALIDATED
@@ -295,6 +297,7 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
                 Log.d("LocationService", "POI $poiId réinitialisé")
             }
         }
+
     }
 
     // =========================================================================
