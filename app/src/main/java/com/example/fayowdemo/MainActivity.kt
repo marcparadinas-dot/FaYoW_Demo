@@ -14,7 +14,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.view.View
 import android.widget.Button
@@ -29,7 +28,6 @@ import androidx.activity.compose.setContent
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.example.fayowdemo.auth.AuthActions
 import com.example.fayowdemo.auth.AuthManager
-import com.example.fayowdemo.location.CommuneManager
 import com.example.fayowdemo.model.PendingPoi
 import com.example.fayowdemo.model.PointInteret
 import com.example.fayowdemo.model.PoiStatus
@@ -42,8 +40,6 @@ import com.google.android.gms.location.*
 import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.OnMapReadyCallback
 import com.google.android.gms.maps.SupportMapFragment
-import com.google.android.gms.maps.model.LatLng
-import java.util.Locale
 
 @RequiresApi(Build.VERSION_CODES.CUPCAKE)
 class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListener {
@@ -55,7 +51,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     private lateinit var authManager: AuthManager
     private lateinit var permissionManager: PermissionManager
     private lateinit var mapManager: MapManager
-    private lateinit var communeManager: CommuneManager
     private val poiRepository = PoiRepository()
 
     // -------------------------------------------------------------------------
@@ -63,15 +58,11 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     // -------------------------------------------------------------------------
 
     private val pointsInteret        = mutableListOf<PointInteret>()
-    private val pointsDejaDeclenches = mutableSetOf<String>() // reflète l'état de LocationService
-    private val poisLusIds           = mutableSetOf<String>() // reflète poisLusEffectifs du service
-
+    private val pointsDejaDeclenches = mutableSetOf<String>()
+    private val poisLusIds           = mutableSetOf<String>()
     private var poisLusLoaded        = false
     private var isAuthenticated      = false
     private var pointsInteretCharges = false
-    private var communeAnnoncee      = false
-    private var communeAnnonceeDifferee = false
-    private var mainActivityPoisActif   = false
 
     // -------------------------------------------------------------------------
     // Carte
@@ -86,7 +77,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var locationRequest: LocationRequest
-    private lateinit var locationCallback: LocationCallback
+    // var nullable pour pouvoir forcer la réinitialisation à la reconnexion
+    private var locationCallback: LocationCallback? = null
 
     // -------------------------------------------------------------------------
     // Capteurs (boussole)
@@ -95,14 +87,14 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     private lateinit var sensorManager: SensorManager
     private var accelerometer: Sensor? = null
     private var magnetometer: Sensor? = null
-    private val gravity          = FloatArray(3)
-    private val geomagnetic      = FloatArray(3)
-    private val rotationMatrix   = FloatArray(9)
+    private val gravity           = FloatArray(3)
+    private val geomagnetic       = FloatArray(3)
+    private val rotationMatrix    = FloatArray(9)
     private val orientationAngles = FloatArray(3)
-    private var currentAzimuth   = 0f
+    private var currentAzimuth    = 0f
 
     // -------------------------------------------------------------------------
-    // Text-to-Speech (dialog uniquement — le TTS audio est dans LocationService)
+    // Dialog POI
     // -------------------------------------------------------------------------
 
     private var currentDialog: AlertDialog? = null
@@ -112,9 +104,9 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     // -------------------------------------------------------------------------
 
     /**
-     * POI_DECLENCHE : reçu depuis LocationService quand un POI est à portée.
-     * - utteranceDone=false → afficher le dialog
-     * - utteranceDone=true  → fermer le dialog
+     * POI_DECLENCHE :
+     *   utteranceDone=false → afficher le dialog
+     *   utteranceDone=true  → fermer le dialog
      */
     private val poiDeclencheReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -123,7 +115,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             val utteranceDone = intent.getBooleanExtra("utteranceDone", false)
 
             if (utteranceDone) {
-                // TTS terminé → fermer le dialog
                 currentDialog?.dismiss()
                 currentDialog = null
                 return
@@ -132,7 +123,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             val poiId   = intent.getStringExtra("poiId")   ?: return
             val message = intent.getStringExtra("message") ?: return
 
-            // Mettre à jour la carte
             pointsDejaDeclenches.add(poiId)
             if (::mMap.isInitialized) {
                 mapManager.rafraichirCarte(
@@ -141,7 +131,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 )
             }
 
-            // Afficher le dialog synchronisé avec le TTS
             currentDialog?.dismiss()
             currentDialog = AlertDialog.Builder(this@MainActivity)
                 .setTitle("Information")
@@ -154,8 +143,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     }
 
     /**
-     * POI_LU : reçu depuis LocationService quand un POI VALIDATED est marqué lu dans Firestore.
-     * Met à jour la carte en supprimant le cercle.
+     * POI_LU : POI VALIDATED marqué lu dans Firestore → supprimer le cercle.
      */
     private val poiLuReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -164,6 +152,31 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             Log.d("MainActivity", "POI lu reçu : $poiId")
             poisLusIds.add(poiId)
             mapManager.supprimerCerclePoi(poiId)
+        }
+    }
+
+    /**
+     * SYNC_ETAT : reçu au réveil de veille.
+     * Contient les IDs lus pendant que MainActivity était en onStop.
+     * Met à jour la carte pour supprimer les cercles manquants.
+     */
+    private val syncEtatReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != LocationService.ACTION_SYNC_ETAT) return
+            @Suppress("UNCHECKED_CAST")
+            val ids = intent.getSerializableExtra("poisLusPendantVeille") as? HashSet<String>
+                ?: return
+            if (ids.isEmpty()) return
+
+            Log.d("MainActivity", "Sync état reçu : ${ids.size} POIs lus pendant la veille")
+            poisLusIds.addAll(ids)
+            pointsDejaDeclenches.addAll(ids)
+            if (::mMap.isInitialized) {
+                mapManager.rafraichirCarte(
+                    mMap, pointsInteret, poisLusIds,
+                    pointsDejaDeclenches, currentLocation, currentAzimuth
+                )
+            }
         }
     }
 
@@ -176,29 +189,22 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         super.onCreate(savedInstanceState)
         supportActionBar?.hide()
 
-        // 1. Managers
         permissionManager = PermissionManager(this)
         val (fineLauncher, backgroundLauncher) = permissionManager.creerLaunchers()
         permissionManager.enregistrerLaunchers(fineLauncher, backgroundLauncher)
 
-        authManager   = AuthManager(this)
-        mapManager    = MapManager(this)
-        communeManager = CommuneManager(this)
-        communeManager.initialiserTts()
+        authManager = AuthManager(this)
+        mapManager  = MapManager(this)
 
-        // 2. Callbacks
         configurerCallbacksAuth()
         configurerCallbacksPermissions()
 
-        // 3. Localisation
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
 
-        // 4. Capteurs
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         magnetometer  = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
 
-        // 5. Nettoyage fragment carte (rotation d'écran)
         if (savedInstanceState != null) {
             supportFragmentManager.findFragmentById(R.id.map)?.let { fragment ->
                 supportFragmentManager.beginTransaction()
@@ -208,7 +214,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             }
         }
 
-        // 6. Navigation initiale
         if (authManager.isUserLoggedIn()) {
             isAuthenticated = true
             afficherEcranCarte()
@@ -219,31 +224,32 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
     override fun onStart() {
         super.onStart()
-        val broadcastManager = LocalBroadcastManager.getInstance(this)
-        broadcastManager.registerReceiver(
-            poiDeclencheReceiver,
-            IntentFilter(LocationService.ACTION_POI_DECLENCHE)
-        )
-        broadcastManager.registerReceiver(
-            poiLuReceiver,
-            IntentFilter(LocationService.ACTION_POI_LU)
-        )
+        val bm = LocalBroadcastManager.getInstance(this)
+        bm.registerReceiver(poiDeclencheReceiver, IntentFilter(LocationService.ACTION_POI_DECLENCHE))
+        bm.registerReceiver(poiLuReceiver,        IntentFilter(LocationService.ACTION_POI_LU))
+        bm.registerReceiver(syncEtatReceiver,     IntentFilter(LocationService.ACTION_SYNC_ETAT))
+
+        // Signale au service que MainActivity est visible → déclenche la sync
+        bm.sendBroadcast(Intent(LocationService.ACTION_MAIN_STARTED))
     }
 
     override fun onStop() {
         super.onStop()
-        val broadcastManager = LocalBroadcastManager.getInstance(this)
-        broadcastManager.unregisterReceiver(poiDeclencheReceiver)
-        broadcastManager.unregisterReceiver(poiLuReceiver)
+        val bm = LocalBroadcastManager.getInstance(this)
+        bm.unregisterReceiver(poiDeclencheReceiver)
+        bm.unregisterReceiver(poiLuReceiver)
+        bm.unregisterReceiver(syncEtatReceiver)
+
+        // Signale au service que MainActivity passe en veille
+        bm.sendBroadcast(Intent(LocationService.ACTION_MAIN_STOPPED))
     }
 
     @RequiresPermission(allOf = [android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.ACCESS_COARSE_LOCATION])
     override fun onResume() {
         super.onResume()
         sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_UI)
-        sensorManager.registerListener(this, magnetometer, SensorManager.SENSOR_DELAY_UI)
+        sensorManager.registerListener(this, magnetometer,  SensorManager.SENSOR_DELAY_UI)
 
-        // Relance la localisation si nécessaire (retour de veille)
         if (permissionManager.hasAllLocationPermissions() && isAuthenticated && ::mMap.isInitialized) {
             startLocationUpdates()
         }
@@ -256,7 +262,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     }
 
     override fun onDestroy() {
-        communeManager.shutdown()
         stopLocationService()
         super.onDestroy()
     }
@@ -308,34 +313,35 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
     private fun configurerCallbacksAuth() {
         authManager.onSignInSuccess = {
-            isAuthenticated     = true
-            communeAnnoncee     = false
-            communeAnnonceeDifferee = false
-            pointsInteretCharges    = false
-            mainActivityPoisActif   = false
+            isAuthenticated      = true
+            pointsInteretCharges = false
             poisLusIds.clear()
             pointsDejaDeclenches.clear()
-            communeManager.reinitialiser()
+            pointsInteret.clear()
+            // Forcer la réinitialisation du locationCallback pour éviter le freeze
+            locationCallback = null
+            currentDialog?.dismiss()
+            currentDialog = null
             afficherEcranCarte()
         }
         authManager.onSignUpSuccess = {
-            isAuthenticated     = true
-            communeAnnoncee     = false
-            communeAnnonceeDifferee = false
-            pointsInteretCharges    = false
-            mainActivityPoisActif   = false
+            isAuthenticated      = true
+            pointsInteretCharges = false
             poisLusIds.clear()
             pointsDejaDeclenches.clear()
-            communeManager.reinitialiser()
+            pointsInteret.clear()
+            locationCallback = null
+            currentDialog?.dismiss()
+            currentDialog = null
             afficherEcranCarte()
         }
         authManager.onSignOutComplete = {
             isAuthenticated = false
-            communeAnnoncee = false
-            pointsInteret.clear()
-            pointsDejaDeclenches.clear()
             poisLusIds.clear()
+            pointsDejaDeclenches.clear()
+            pointsInteret.clear()
             currentLocation = null
+            locationCallback = null
             currentDialog?.dismiss()
             currentDialog = null
             stopLocationService()
@@ -377,18 +383,13 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             chargerPointsInteret()
         }
 
-        // Bouton Ajouter POI
         findViewById<Button>(R.id.btn_add_poi)?.setOnClickListener {
             onAddPoiClicked()
         }
-
-        // Bouton Modération
         findViewById<Button>(R.id.btnModeration)?.setOnClickListener {
             if (authManager.isModerator) showModerationDialog()
             else Toast.makeText(this, "Accès réservé aux modérateurs", Toast.LENGTH_SHORT).show()
         }
-
-        // Bouton Réafficher
         findViewById<Button>(R.id.btnReafficher)?.setOnClickListener {
             if (permissionManager.hasFineLocationPermission()) {
                 afficherDialogReafficher()
@@ -396,8 +397,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 Toast.makeText(this, "Permission de localisation nécessaire", Toast.LENGTH_SHORT).show()
             }
         }
-
-        // Bouton Déconnexion
         findViewById<Button>(R.id.btnLogout)?.setOnClickListener {
             authManager.signOut()
         }
@@ -407,36 +406,20 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         if (!::fusedLocationClient.isInitialized) {
             fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         }
-
         if (!::locationRequest.isInitialized) {
             locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 3000L)
                 .setMinUpdateIntervalMillis(1000L)
                 .build()
         }
 
-        if (!::locationCallback.isInitialized) {
+        // locationCallback est nullable → toujours recréé ici si null
+        if (locationCallback == null) {
             locationCallback = object : LocationCallback() {
                 override fun onLocationResult(locationResult: LocationResult) {
                     val location = locationResult.lastLocation ?: return
                     currentLocation = location
                     if (::mMap.isInitialized) {
                         mapManager.updateLocationMarker(mMap, location, currentAzimuth)
-                    }
-
-                    // Annonce différée si la position n'était pas connue au chargement
-                    if (communeAnnonceeDifferee && !communeAnnoncee && pointsInteretCharges) {
-                        communeAnnonceeDifferee = false
-                        annoncerCommuneApresChargement()
-                    }
-
-                    // Changements de commune après la première annonce
-                    if (communeAnnoncee) {
-                        communeManager.verifierCommune(
-                            latitude      = location.latitude,
-                            longitude     = location.longitude,
-                            pointsInteret = pointsInteret,
-                            poisLusIds    = poisLusIds
-                        )
                     }
                 }
             }
@@ -551,37 +534,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             )
         }
         pointsInteretCharges = true
-        annoncerCommuneApresChargement()
-    }
-
-    private fun annoncerCommuneApresChargement() {
-        Log.d("FAYOWDEBUG", "annoncerCommuneApresChargement appelé | communeAnnoncee=$communeAnnoncee | currentLocation=$currentLocation | pointsInteret.size=${pointsInteret.size} | pointsInteretCharges=$pointsInteretCharges")
-        if (communeAnnoncee) return
-        if (!pointsInteretCharges) {
-            communeAnnonceeDifferee = true
-            return
-        }
-        val location = currentLocation ?: run {
-            Log.d("FAYOWDEBUG", "Position inconnue, annonce différée")
-            communeAnnonceeDifferee = true
-            return
-        }
-        communeAnnoncee = true
-        Handler(Looper.getMainLooper()).postDelayed({
-            mainActivityPoisActif = true
-        }, 5000)
-        communeManager.verifierCommune(
-            latitude      = location.latitude,
-            longitude     = location.longitude,
-            pointsInteret = pointsInteret,
-            poisLusIds    = poisLusIds
-        )
     }
 
     // =========================================================================
     // Réaffichage des POIs
-    // Envoie les IDs à réafficher à LocationService via broadcast,
-    // et met à jour la carte localement.
     // =========================================================================
 
     private fun afficherDialogReafficher() {
@@ -603,18 +559,15 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             .show()
     }
 
-    /**
-     * Envoie les IDs réaffichés à LocationService et rafraîchit la carte.
-     * poisLusIds local est mis à jour pour que la carte reflète l'état correct.
-     */
     private fun envoyerReaffichageAuService(ids: Set<String>) {
         poisLusIds.removeAll(ids)
         pointsDejaDeclenches.removeAll(ids)
 
-        val intent = Intent(LocationService.ACTION_REAFFICHER_POIS).apply {
-            putExtra("ids", HashSet(ids))
-        }
-        LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+        LocalBroadcastManager.getInstance(this).sendBroadcast(
+            Intent(LocationService.ACTION_REAFFICHER_POIS).apply {
+                putExtra("ids", HashSet(ids))
+            }
+        )
 
         if (::mMap.isInitialized) {
             mapManager.rafraichirCarte(
@@ -629,7 +582,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             Toast.makeText(this, "Localisation indisponible", Toast.LENGTH_SHORT).show()
             return
         }
-        val rayons = arrayOf("100 mètres", "500 mètres", "1 kilomètre", "5 kilomètres")
+        val rayons       = arrayOf("100 mètres", "500 mètres", "1 kilomètre", "5 kilomètres")
         val rayonsMetres = listOf(100f, 500f, 1000f, 5000f)
 
         AlertDialog.Builder(this)
@@ -658,7 +611,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     }
 
     private fun reafficherDepuisDate() {
-        val uid = authManager.getCurrentUser()?.uid ?: return
+        val uid      = authManager.getCurrentUser()?.uid ?: return
         val periodes = arrayOf("Aujourd'hui", "Cette semaine", "Ce mois-ci", "Cette année")
         val calendar = java.util.Calendar.getInstance()
 
@@ -672,16 +625,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                     2 -> calendar.add(java.util.Calendar.MONTH, -1)
                     3 -> calendar.add(java.util.Calendar.YEAR, -1)
                 }
-                val depuis = calendar.time
-
-                poiRepository.chargerPoisLusDepuisDate(uid, depuis,
+                poiRepository.chargerPoisLusDepuisDate(uid, calendar.time,
                     onSuccess = { ids ->
                         envoyerReaffichageAuService(ids)
-                        Toast.makeText(
-                            this,
-                            "${ids.size} anecdote(s) réaffichée(s)",
-                            Toast.LENGTH_SHORT
-                        ).show()
+                        Toast.makeText(this, "${ids.size} anecdote(s) réaffichée(s)", Toast.LENGTH_SHORT).show()
                     },
                     onError = {
                         Toast.makeText(this, "Erreur : ${it.message}", Toast.LENGTH_SHORT).show()
@@ -697,9 +644,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             .setTitle("Réafficher toutes les anecdotes")
             .setMessage("Toutes les anecdotes déjà lues seront réaffichées temporairement. Votre historique de lecture reste conservé.")
             .setPositiveButton("Confirmer") { _, _ ->
-                // On envoie tous les IDs lus au service
-                val tousLesIds = HashSet(poisLusIds)
-                envoyerReaffichageAuService(tousLesIds)
+                envoyerReaffichageAuService(HashSet(poisLusIds))
                 Toast.makeText(this, "Toutes les anecdotes sont réaffichées", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Annuler", null)
@@ -707,7 +652,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     }
 
     // =========================================================================
-    // Dialogs POI
+    // Dialogs POI (ajout / édition / modération)
     // =========================================================================
 
     private fun onAddPoiClicked() {
@@ -742,7 +687,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     }
 
     private fun showEditMyPoiDialog(poi: PointInteret) {
-        val dialogView = layoutInflater.inflate(R.layout.dialog_edit_poi, null)
+        val dialogView  = layoutInflater.inflate(R.layout.dialog_edit_poi, null)
         val editMessage = dialogView.findViewById<EditText>(R.id.editPoiMessage).apply {
             setText(poi.message)
         }
@@ -806,13 +751,13 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     }
 
     private fun showPoiEditDialog(poi: PendingPoi) {
-        val dialogView = layoutInflater.inflate(R.layout.dialog_edit_poi, null)
-        val editMessage = dialogView.findViewById<EditText>(R.id.editPoiMessage).apply {
+        val dialogView    = layoutInflater.inflate(R.layout.dialog_edit_poi, null)
+        val editMessage   = dialogView.findViewById<EditText>(R.id.editPoiMessage).apply {
             setText(poi.message)
         }
         val checkApproved = dialogView.findViewById<CheckBox>(R.id.checkApproved).apply {
             isChecked = false
-            text = "Valider cette anecdote"
+            text      = "Valider cette anecdote"
         }
         AlertDialog.Builder(this)
             .setTitle("Modérer POI")
@@ -822,7 +767,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                     "message" to editMessage.text.toString().trim()
                 )
                 if (checkApproved.isChecked) {
-                    updates["status"] = "validated"
+                    updates["status"]   = "validated"
                     updates["approved"] = true
                 }
                 poiRepository.mettreAJourPoi(poi.id, updates,
@@ -853,7 +798,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                     .setMinUpdateIntervalMillis(1000L)
                     .build()
             }
-            if (!::locationCallback.isInitialized) {
+            if (locationCallback == null) {
                 locationCallback = object : LocationCallback() {
                     override fun onLocationResult(locationResult: LocationResult) {
                         val location = locationResult.lastLocation ?: return
@@ -861,29 +806,23 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                         if (::mMap.isInitialized) {
                             mapManager.updateLocationMarker(mMap, location, currentAzimuth)
                         }
-                        if (communeAnnoncee) {
-                            communeManager.verifierCommune(
-                                latitude      = location.latitude,
-                                longitude     = location.longitude,
-                                pointsInteret = pointsInteret,
-                                poisLusIds    = poisLusIds
-                            )
-                        }
                     }
                 }
             }
-            fusedLocationClient.removeLocationUpdates(locationCallback)
-            fusedLocationClient.requestLocationUpdates(
-                locationRequest, locationCallback, Looper.getMainLooper()
-            )
+            locationCallback?.let {
+                fusedLocationClient.removeLocationUpdates(it)
+                fusedLocationClient.requestLocationUpdates(
+                    locationRequest, it, Looper.getMainLooper()
+                )
+            }
         } catch (e: SecurityException) {
             Log.e("MainActivity", "Erreur permission localisation : ${e.message}")
         }
     }
 
     private fun stopLocationUpdates() {
-        if (::locationCallback.isInitialized) {
-            fusedLocationClient.removeLocationUpdates(locationCallback)
+        locationCallback?.let {
+            fusedLocationClient.removeLocationUpdates(it)
         }
     }
 

@@ -23,10 +23,13 @@ import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.example.fayowdemo.MainActivity
 import com.example.fayowdemo.R
+import com.example.fayowdemo.location.CommuneManager
+import com.example.fayowdemo.model.PointInteret
 import com.example.fayowdemo.model.PoiData
 import com.example.fayowdemo.model.PoiStatus
 import com.example.fayowdemo.repository.PoiRepository
 import com.google.android.gms.location.*
+import com.google.android.gms.maps.model.LatLng
 import com.google.firebase.auth.FirebaseAuth
 import java.util.Locale
 
@@ -39,6 +42,7 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
     private val poiRepository = PoiRepository()
     private val auth = FirebaseAuth.getInstance()
     private lateinit var authStateListener: FirebaseAuth.AuthStateListener
+    private lateinit var communeManager: CommuneManager
 
     // -------------------------------------------------------------------------
     // État des POIs
@@ -46,8 +50,9 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
     // poisLusIdsPermanents : lus dans Firestore (persistant entre sessions)
     // poisSession          : PROPOSED déclenchés dans la session (non Firestore)
     // poisReaffiches       : temporairement réactivés par l'utilisateur
-    // poisLusEffectifs     : ensemble calculé utilisé pour filtrer les déclenchements
-    // pointsDejaDeclenches : évite le double déclenchement dans la session courante
+    // poisLusEffectifs     : calculé = (permanents + session) - reaffiches
+    // pointsDejaDeclenches : évite le double déclenchement dans la session
+    // poisLusPendantVeille : accumulés pendant onStop de MainActivity → sync au réveil
     // -------------------------------------------------------------------------
 
     private val poisLusIdsPermanents = mutableSetOf<String>()
@@ -55,6 +60,7 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
     private val poisReaffiches       = mutableSetOf<String>()
     private val pointsDejaDeclenches = mutableSetOf<String>()
     private val poiDocuments         = mutableMapOf<String, PoiData>()
+    private val poisLusPendantVeille = mutableSetOf<String>()
 
     private val poisLusEffectifs: Set<String>
         get() = (poisLusIdsPermanents + poisSession) - poisReaffiches
@@ -64,6 +70,7 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
     private var isLoadingPoisLus      = false
     private var isTtsReady            = false
     private var isSpeakingPoi         = false
+    private var mainActivityActive    = false
 
     private val PROXIMITY_THRESHOLD = 20.0
 
@@ -74,49 +81,66 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var locationRequest: LocationRequest
     private lateinit var locationCallback: LocationCallback
+    private var currentLocation: Location? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
     // -------------------------------------------------------------------------
-    // Text-to-Speech
+    // Text-to-Speech POIs
     // -------------------------------------------------------------------------
 
     private lateinit var textToSpeech: TextToSpeech
 
     // -------------------------------------------------------------------------
-    // BroadcastReceiver — reçoit les demandes de réaffichage de MainActivity
+    // BroadcastReceiver — reçoit les commandes de MainActivity
     // -------------------------------------------------------------------------
 
-    private val reafficherReceiver = object : BroadcastReceiver() {
+    private val commandReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
+
                 ACTION_REAFFICHER_POIS -> {
                     @Suppress("UNCHECKED_CAST")
                     val ids = intent.getSerializableExtra("ids") as? HashSet<String> ?: return
                     poisReaffiches.addAll(ids)
-                    // Retire aussi ces ids de pointsDejaDeclenches pour permettre
-                    // un nouveau déclenchement
                     pointsDejaDeclenches.removeAll(ids)
                     Log.d("LocationService", "${ids.size} POIs réaffichés en session")
                 }
+
                 ACTION_REINITIALISER_REAFFICHAGE -> {
                     poisReaffiches.clear()
                     Log.d("LocationService", "Réaffichage réinitialisé")
+                }
+
+                ACTION_MAIN_STARTED -> {
+                    mainActivityActive = true
+                    envoyerSyncEtat()
+                }
+
+                ACTION_MAIN_STOPPED -> {
+                    mainActivityActive = false
                 }
             }
         }
     }
 
+    // =========================================================================
+    // Constantes broadcast
+    // =========================================================================
+
     companion object {
-        const val CHANNEL_ID    = "LocationServiceChannel"
+        const val CHANNEL_ID      = "LocationServiceChannel"
         const val NOTIFICATION_ID = 1
 
-        // Actions broadcast émises vers MainActivity
+        // Émis vers MainActivity
         const val ACTION_POI_DECLENCHE = "com.sncf.fayow.POI_DECLENCHE"
         const val ACTION_POI_LU        = "com.sncf.fayow.POI_LU"
+        const val ACTION_SYNC_ETAT     = "com.sncf.fayow.SYNC_ETAT"
 
-        // Actions broadcast reçues depuis MainActivity
-        const val ACTION_REAFFICHER_POIS         = "com.sncf.fayow.REAFFICHER_POIS"
+        // Reçus depuis MainActivity
+        const val ACTION_REAFFICHER_POIS           = "com.sncf.fayow.REAFFICHER_POIS"
         const val ACTION_REINITIALISER_REAFFICHAGE = "com.sncf.fayow.REINITIALISER_REAFFICHAGE"
+        const val ACTION_MAIN_STARTED              = "com.sncf.fayow.MAIN_STARTED"
+        const val ACTION_MAIN_STOPPED              = "com.sncf.fayow.MAIN_STOPPED"
     }
 
     // =========================================================================
@@ -130,18 +154,22 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
         Log.d("LocationService", "Service créé")
 
         textToSpeech = TextToSpeech(this, this)
+
+        communeManager = CommuneManager(this)
+        communeManager.initialiserTts()
+
         acquireWakeLock()
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification())
 
-        // Enregistrement du receiver pour les demandes de réaffichage
         val filter = IntentFilter().apply {
             addAction(ACTION_REAFFICHER_POIS)
             addAction(ACTION_REINITIALISER_REAFFICHAGE)
+            addAction(ACTION_MAIN_STARTED)
+            addAction(ACTION_MAIN_STOPPED)
         }
-        LocalBroadcastManager.getInstance(this).registerReceiver(reafficherReceiver, filter)
+        LocalBroadcastManager.getInstance(this).registerReceiver(commandReceiver, filter)
 
-        // Chargement des POIs depuis Firestore
         poiRepository.chargerPoisApprouves(
             onSuccess = { poiMap ->
                 poiDocuments.clear()
@@ -155,32 +183,33 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
             }
         )
 
-        // Écoute des changements d'authentification
         authStateListener = FirebaseAuth.AuthStateListener { firebaseAuth ->
             val user = firebaseAuth.currentUser
             if (user != null) {
                 isPoisLusReady = false
                 poisSession.clear()
+                poisReaffiches.clear()
+                poisLusPendantVeille.clear()
                 pointsDejaDeclenches.clear()
+                communeManager.reinitialiser()
                 if (!isLoadingPoisLus) chargerPoisLus(user.uid)
             } else {
                 poisLusIdsPermanents.clear()
                 poisSession.clear()
                 poisReaffiches.clear()
+                poisLusPendantVeille.clear()
                 pointsDejaDeclenches.clear()
                 isPoisLusReady = false
             }
         }
         auth.addAuthStateListener(authStateListener)
-
-        // Chargement initial si déjà connecté
         auth.currentUser?.let { chargerPoisLus(it.uid) }
 
         attendreEtDemarrer()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d("LocationService", "Service démarré")
+        Log.d("LocationService", "Service démarré/redémarré")
         return START_STICKY
     }
 
@@ -188,7 +217,8 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
         super.onDestroy()
         Log.d("LocationService", "Service détruit")
         auth.removeAuthStateListener(authStateListener)
-        LocalBroadcastManager.getInstance(this).unregisterReceiver(reafficherReceiver)
+        LocalBroadcastManager.getInstance(this).unregisterReceiver(commandReceiver)
+        communeManager.shutdown()
         wakeLock?.let { if (it.isHeld) it.release() }
         if (::fusedLocationClient.isInitialized && ::locationCallback.isInitialized) {
             fusedLocationClient.removeLocationUpdates(locationCallback)
@@ -200,7 +230,20 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
     }
 
     // =========================================================================
-    // Text-to-Speech
+    // Synchronisation d'état avec MainActivity
+    // =========================================================================
+
+    private fun envoyerSyncEtat() {
+        val intent = Intent(ACTION_SYNC_ETAT).apply {
+            putExtra("poisLusPendantVeille", HashSet(poisLusPendantVeille))
+        }
+        LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+        poisLusPendantVeille.clear()
+        Log.d("LocationService", "Sync état envoyé à MainActivity")
+    }
+
+    // =========================================================================
+    // Text-to-Speech POIs
     // =========================================================================
 
     override fun onInit(status: Int) {
@@ -222,29 +265,29 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
                     textToSpeech.voice = voixMasculine
                     Log.d("TTS", "Voix masculine activée : ${voixMasculine.name}")
                 }
-
-                // Quand le TTS termine, on signale à MainActivity que la parole est finie
                 textToSpeech.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String) {}
                     override fun onDone(utteranceId: String) {
                         isSpeakingPoi = false
-                        val intent = Intent(ACTION_POI_DECLENCHE).apply {
-                            putExtra("utteranceDone", true)
-                            putExtra("utteranceId", utteranceId)
+                        if (mainActivityActive) {
+                            val intent = Intent(ACTION_POI_DECLENCHE).apply {
+                                putExtra("utteranceDone", true)
+                                putExtra("utteranceId", utteranceId)
+                            }
+                            LocalBroadcastManager.getInstance(this@LocationService)
+                                .sendBroadcast(intent)
                         }
-                        LocalBroadcastManager.getInstance(this@LocationService).sendBroadcast(intent)
                     }
                     @Deprecated("Déprécié")
                     override fun onError(utteranceId: String) {
                         isSpeakingPoi = false
                     }
                 })
-
                 isTtsReady = true
-                Log.d("TTS", "TTS prêt en français")
+                Log.d("TTS", "TTS POIs prêt en français")
             }
         } else {
-            Log.e("TTS", "Erreur initialisation TTS")
+            Log.e("TTS", "Erreur initialisation TTS POIs")
             isTtsReady = false
         }
     }
@@ -256,7 +299,7 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
         }
         isSpeakingPoi = true
         textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
-        Log.d("TTS", "Lecture : $text")
+        Log.d("TTS", "Lecture POI : $text")
     }
 
     // =========================================================================
@@ -266,7 +309,6 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
     private fun chargerPoisLus(uid: String) {
         if (isLoadingPoisLus) return
         isLoadingPoisLus = true
-
         poiRepository.chargerPoisLus(uid,
             onSuccess = { ids ->
                 poisLusIdsPermanents.clear()
@@ -286,16 +328,17 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
     private fun marquerPoiCommeLu(poiId: String) {
         val uid = auth.currentUser?.uid ?: return
         if (poisLusIdsPermanents.contains(poiId)) return
-
         poisLusIdsPermanents.add(poiId)
+
         poiRepository.marquerPoiCommeLu(uid, poiId,
             onSuccess = {
                 Log.d("LocationService", "POI $poiId marqué comme lu dans Firestore")
-                // Informe MainActivity pour qu'il supprime le cercle
-                val intent = Intent(ACTION_POI_LU).apply {
-                    putExtra("poiId", poiId)
+                if (mainActivityActive) {
+                    val intent = Intent(ACTION_POI_LU).apply { putExtra("poiId", poiId) }
+                    LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+                } else {
+                    poisLusPendantVeille.add(poiId)
                 }
-                LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
             },
             onError = {
                 Log.e("LocationService", "Erreur marquage POI lu : ${it.message}")
@@ -331,7 +374,15 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
         locationCallback = object : LocationCallback() {
             override fun onLocationResult(locationResult: LocationResult) {
                 locationResult.lastLocation?.let { location ->
+                    currentLocation = location
                     verifierPointsInteret(location)
+                    // Commune : toujours vérifiée, écran allumé ou éteint
+                    communeManager.verifierCommune(
+                        latitude      = location.latitude,
+                        longitude     = location.longitude,
+                        pointsInteret = poiDocumentsAsPointsInteret(),
+                        poisLusIds    = poisLusEffectifs
+                    )
                 }
             }
         }
@@ -342,6 +393,21 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
             Looper.getMainLooper()
         )
         Log.d("LocationService", "Mises à jour de localisation démarrées")
+    }
+
+    /**
+     * Convertit poiDocuments (Map<String, PoiData>) en List<PointInteret>
+     * pour l'appel à CommuneManager.verifierCommune().
+     */
+    private fun poiDocumentsAsPointsInteret(): List<PointInteret> {
+        return poiDocuments.map { (id, data) ->
+            PointInteret(
+                id       = id,
+                position = LatLng(data.latitude, data.longitude),
+                message  = data.message,
+                status   = data.status
+            )
+        }
     }
 
     private fun verifierPointsInteret(location: Location) {
@@ -355,7 +421,6 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
             }
             val distance = location.distanceTo(poiLocation)
 
-            // Déclenchement
             if (distance <= PROXIMITY_THRESHOLD
                 && !pointsDejaDeclenches.contains(poiId)
                 && !poisLusEffectifs.contains(poiId)
@@ -365,33 +430,30 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
 
                 val utteranceId = "poi_message_$poiId"
 
-                // Broadcast vers MainActivity AVANT le speak
-                // pour que le dialog s'affiche en même temps que le TTS
-                val broadcastIntent = Intent(ACTION_POI_DECLENCHE).apply {
-                    putExtra("poiId",       poiId)
-                    putExtra("message",     poiData.message)
-                    putExtra("utteranceId", utteranceId)
-                    putExtra("utteranceDone", false)
+                if (mainActivityActive) {
+                    val broadcastIntent = Intent(ACTION_POI_DECLENCHE).apply {
+                        putExtra("poiId",         poiId)
+                        putExtra("message",       poiData.message)
+                        putExtra("utteranceId",   utteranceId)
+                        putExtra("utteranceDone", false)
+                    }
+                    LocalBroadcastManager.getInstance(this).sendBroadcast(broadcastIntent)
                 }
-                LocalBroadcastManager.getInstance(this).sendBroadcast(broadcastIntent)
 
                 speak(poiData.message, utteranceId)
 
-                // Marquage Firestore uniquement pour les VALIDATED
                 when (poiData.status) {
                     PoiStatus.VALIDATED -> marquerPoiCommeLu(poiId)
                     PoiStatus.PROPOSED  -> {
-                        // Lu en session uniquement, pas dans Firestore
                         poisSession.add(poiId)
                         Log.d("LocationService", "POI $poiId PROPOSED — lu en session uniquement")
                     }
                     PoiStatus.INITIATED -> { /* ne devrait pas arriver */ }
                 }
 
-                break // un seul POI à la fois
+                break
             }
 
-            // Réinitialisation quand on s'éloigne (permet un nouveau déclenchement si réaffiché)
             if (distance > PROXIMITY_THRESHOLD * 2) {
                 pointsDejaDeclenches.remove(poiId)
             }
