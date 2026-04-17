@@ -47,10 +47,10 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
     // -------------------------------------------------------------------------
     // État des POIs
     //
-    // poisLusIdsPermanents : lus dans Firestore (persistant entre sessions)
+    // poisLusIdsPermanents : lus dans Firestore — source de vérité pour l'annonce commune
     // poisSession          : PROPOSED déclenchés dans la session (non Firestore)
     // poisReaffiches       : temporairement réactivés par l'utilisateur
-    // poisLusEffectifs     : calculé = (permanents + session) - reaffiches
+    // poisLusEffectifs     : calculé = (permanents + session) - reaffiches → filtre déclenchement
     // pointsDejaDeclenches : évite le double déclenchement dans la session
     // poisLusPendantVeille : accumulés pendant onStop de MainActivity → sync au réveil
     // -------------------------------------------------------------------------
@@ -62,6 +62,7 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
     private val poiDocuments         = mutableMapOf<String, PoiData>()
     private val poisLusPendantVeille = mutableSetOf<String>()
 
+    // Utilisé pour filtrer les déclenchements (tient compte du réaffichage)
     private val poisLusEffectifs: Set<String>
         get() = (poisLusIdsPermanents + poisSession) - poisReaffiches
 
@@ -112,12 +113,15 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
                 }
 
                 ACTION_MAIN_STARTED -> {
+                    // MainActivity est visible et prête (envoyé depuis onMapReady)
                     mainActivityActive = true
                     envoyerSyncEtat()
+                    Log.d("LocationService", "MainActivity active, sync envoyée")
                 }
 
                 ACTION_MAIN_STOPPED -> {
                     mainActivityActive = false
+                    Log.d("LocationService", "MainActivity inactive")
                 }
             }
         }
@@ -233,6 +237,11 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
     // Synchronisation d'état avec MainActivity
     // =========================================================================
 
+    /**
+     * Appelé quand MainActivity envoie ACTION_MAIN_STARTED (depuis onMapReady).
+     * Envoie tous les IDs lus pendant la veille pour que MainActivity
+     * puisse mettre à jour sa carte.
+     */
     private fun envoyerSyncEtat() {
         val intent = Intent(ACTION_SYNC_ETAT).apply {
             putExtra("poisLusPendantVeille", HashSet(poisLusPendantVeille))
@@ -337,6 +346,7 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
                     val intent = Intent(ACTION_POI_LU).apply { putExtra("poiId", poiId) }
                     LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
                 } else {
+                    // MainActivity en veille → accumuler pour la prochaine sync
                     poisLusPendantVeille.add(poiId)
                 }
             },
@@ -376,12 +386,15 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
                 locationResult.lastLocation?.let { location ->
                     currentLocation = location
                     verifierPointsInteret(location)
-                    // Commune : toujours vérifiée, écran allumé ou éteint
+                    // Commune vérifiée en permanence, écran allumé ou éteint.
+                    // On passe poisLusIdsPermanents (pas poisLusEffectifs) pour que
+                    // l'annonce reflète l'historique réel Firestore, indépendamment
+                    // du réaffichage temporaire.
                     communeManager.verifierCommune(
                         latitude      = location.latitude,
                         longitude     = location.longitude,
                         pointsInteret = poiDocumentsAsPointsInteret(),
-                        poisLusIds    = poisLusEffectifs
+                        poisLusIds    = poisLusIdsPermanents
                     )
                 }
             }
@@ -396,8 +409,7 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
     }
 
     /**
-     * Convertit poiDocuments (Map<String, PoiData>) en List<PointInteret>
-     * pour l'appel à CommuneManager.verifierCommune().
+     * Convertit poiDocuments en List<PointInteret> pour CommuneManager.
      */
     private fun poiDocumentsAsPointsInteret(): List<PointInteret> {
         return poiDocuments.map { (id, data) ->
@@ -451,7 +463,7 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
                     PoiStatus.INITIATED -> { /* ne devrait pas arriver */ }
                 }
 
-                break
+                break // un seul POI à la fois
             }
 
             if (distance > PROXIMITY_THRESHOLD * 2) {

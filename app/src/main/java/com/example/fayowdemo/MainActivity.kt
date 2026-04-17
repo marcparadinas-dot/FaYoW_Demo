@@ -77,7 +77,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var locationRequest: LocationRequest
-    // var nullable pour pouvoir forcer la réinitialisation à la reconnexion
+    // Nullable pour permettre la réinitialisation à la reconnexion
     private var locationCallback: LocationCallback? = null
 
     // -------------------------------------------------------------------------
@@ -123,6 +123,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             val poiId   = intent.getStringExtra("poiId")   ?: return
             val message = intent.getStringExtra("message") ?: return
 
+            // Mettre à jour la carte
             pointsDejaDeclenches.add(poiId)
             if (::mMap.isInitialized) {
                 mapManager.rafraichirCarte(
@@ -131,6 +132,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 )
             }
 
+            // Afficher le dialog synchronisé avec le TTS
             currentDialog?.dismiss()
             currentDialog = AlertDialog.Builder(this@MainActivity)
                 .setTitle("Information")
@@ -156,9 +158,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     }
 
     /**
-     * SYNC_ETAT : reçu au réveil de veille.
-     * Contient les IDs lus pendant que MainActivity était en onStop.
-     * Met à jour la carte pour supprimer les cercles manquants.
+     * SYNC_ETAT : reçu depuis LocationService après ACTION_MAIN_STARTED.
+     * Contient les IDs lus pendant la veille → met à jour la carte.
      */
     private val syncEtatReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -228,9 +229,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         bm.registerReceiver(poiDeclencheReceiver, IntentFilter(LocationService.ACTION_POI_DECLENCHE))
         bm.registerReceiver(poiLuReceiver,        IntentFilter(LocationService.ACTION_POI_LU))
         bm.registerReceiver(syncEtatReceiver,     IntentFilter(LocationService.ACTION_SYNC_ETAT))
-
-        // Signale au service que MainActivity est visible → déclenche la sync
-        bm.sendBroadcast(Intent(LocationService.ACTION_MAIN_STARTED))
+        // NE PAS envoyer ACTION_MAIN_STARTED ici — la carte n'est pas encore prête.
+        // Il sera envoyé depuis onMapReady.
     }
 
     override fun onStop() {
@@ -239,8 +239,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         bm.unregisterReceiver(poiDeclencheReceiver)
         bm.unregisterReceiver(poiLuReceiver)
         bm.unregisterReceiver(syncEtatReceiver)
-
-        // Signale au service que MainActivity passe en veille
         bm.sendBroadcast(Intent(LocationService.ACTION_MAIN_STOPPED))
     }
 
@@ -318,11 +316,15 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             poisLusIds.clear()
             pointsDejaDeclenches.clear()
             pointsInteret.clear()
-            // Forcer la réinitialisation du locationCallback pour éviter le freeze
-            locationCallback = null
             currentDialog?.dismiss()
             currentDialog = null
-            afficherEcranCarte()
+            // Relancer l'Activity proprement pour éviter le freeze dû au
+            // mélange Compose/XML et à l'état du fragment manager
+            val intent = Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+            finish()
         }
         authManager.onSignUpSuccess = {
             isAuthenticated      = true
@@ -330,10 +332,13 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             poisLusIds.clear()
             pointsDejaDeclenches.clear()
             pointsInteret.clear()
-            locationCallback = null
             currentDialog?.dismiss()
             currentDialog = null
-            afficherEcranCarte()
+            val intent = Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+            finish()
         }
         authManager.onSignOutComplete = {
             isAuthenticated = false
@@ -346,8 +351,13 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             currentDialog = null
             stopLocationService()
             stopLocationUpdates()
-            afficherEcranAuth()
             Toast.makeText(this, "Déconnecté", Toast.LENGTH_SHORT).show()
+            // Relancer proprement pour retrouver un état vierge
+            val intent = Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+            finish()
         }
     }
 
@@ -412,7 +422,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 .build()
         }
 
-        // locationCallback est nullable → toujours recréé ici si null
+        // locationCallback nullable → recréé si nécessaire
         if (locationCallback == null) {
             locationCallback = object : LocationCallback() {
                 override fun onLocationResult(locationResult: LocationResult) {
@@ -462,7 +472,14 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         }
 
         startLocationUpdates()
-        Log.d("MainActivity", "Carte prête")
+
+        // La carte est prête et les receivers sont enregistrés (onStart déjà appelé) →
+        // on signale au service que MainActivity est active.
+        // C'est le bon moment : le service existe déjà et peut recevoir le broadcast.
+        LocalBroadcastManager.getInstance(this)
+            .sendBroadcast(Intent(LocationService.ACTION_MAIN_STARTED))
+
+        Log.d("MainActivity", "Carte prête, ACTION_MAIN_STARTED envoyé")
     }
 
     // =========================================================================
@@ -559,6 +576,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             .show()
     }
 
+    /**
+     * Envoie les IDs à réafficher au service et met à jour la carte locale.
+     * poisLusIds local est mis à jour pour que la carte reflète l'état correct.
+     */
     private fun envoyerReaffichageAuService(ids: Set<String>) {
         poisLusIds.removeAll(ids)
         pointsDejaDeclenches.removeAll(ids)

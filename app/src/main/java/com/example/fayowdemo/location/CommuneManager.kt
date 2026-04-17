@@ -257,10 +257,10 @@ class CommuneManager(private val context: Context) {
 
         val message = when {
             total == null -> "Vous êtes à $commune."
-            total == 0    -> "Vous êtes à $commune. Cette commune ne contient pas encore d'anecdote FayoW."
+            total == 0    -> "Vous êtes à $commune. Cette commune ne contient pas encore d'anecdote FayoW. N'hésitez pas à l'enrichir avec vos propres anecdotes."
             lus == null   -> "Vous êtes à $commune. Cette commune contient $total anecdote${if (total > 1) "s" else ""} FayoW."
             lus == 0      -> "Vous êtes à $commune. Cette commune contient $total anecdote${if (total > 1) "s" else ""} FayoW, vous n'en avez encore lu aucune."
-            lus == total  -> "Vous êtes à $commune. Cette commune contient $total anecdote${if (total > 1) "s" else ""} FayoW, vous les avez toutes lues !"
+            lus == total  -> "Vous êtes à $commune. Cette commune contient $total anecdote${if (total > 1) "s" else ""} FayoW, vous les avez toutes lues ! Mais vous pouvez l'enrichir avec vos propres anecdotes."
             else          -> "Vous êtes à $commune. Cette commune contient $total anecdote${if (total > 1) "s" else ""} FayoW, vous en avez lu $lus."
         }
 
