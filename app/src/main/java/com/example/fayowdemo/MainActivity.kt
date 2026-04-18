@@ -229,8 +229,14 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         bm.registerReceiver(poiDeclencheReceiver, IntentFilter(LocationService.ACTION_POI_DECLENCHE))
         bm.registerReceiver(poiLuReceiver,        IntentFilter(LocationService.ACTION_POI_LU))
         bm.registerReceiver(syncEtatReceiver,     IntentFilter(LocationService.ACTION_SYNC_ETAT))
-        // NE PAS envoyer ACTION_MAIN_STARTED ici — la carte n'est pas encore prête.
-        // Il sera envoyé depuis onMapReady.
+
+        // Si la carte est déjà prête (retour de veille), signaler au service
+        // que MainActivity est à nouveau active
+        if (::mMap.isInitialized) {
+            bm.sendBroadcast(Intent(LocationService.ACTION_MAIN_STARTED))
+        }
+        // Si la carte n'est pas encore prête, ACTION_MAIN_STARTED sera envoyé
+        // depuis onMapReady au premier lancement
     }
 
     override fun onStop() {
