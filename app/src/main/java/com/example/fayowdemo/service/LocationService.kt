@@ -54,7 +54,7 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
     // pointsDejaDeclenches : évite le double déclenchement dans la session
     // poisLusPendantVeille : accumulés pendant onStop de MainActivity → sync au réveil
     // -------------------------------------------------------------------------
-
+    private var isModerator = false
     private val poisLusIdsPermanents = mutableSetOf<String>()
     private val poisSession          = mutableSetOf<String>()
     private val poisReaffiches       = mutableSetOf<String>()
@@ -214,7 +214,7 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d("LocationService", "Service démarré/redémarré")
-        // MainActivity est forcément active puisqu'elle vient de démarrer le service
+        isModerator = intent?.getBooleanExtra("isModerator", false) ?: false
         mainActivityActive = true
         envoyerSyncEtat()
         return START_STICKY
@@ -428,8 +428,10 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
     private fun verifierPointsInteret(location: Location) {
         if (!isPoisLusReady || !arePoiDocumentsLoaded) return
         if (isSpeakingPoi) return
-
         for ((poiId, poiData) in poiDocuments) {
+            if (poiData.status == PoiStatus.PROPOSED
+                && !isModerator
+                && poiData.creatorUid != auth.currentUser?.uid) continue
             val poiLocation = Location("").apply {
                 latitude  = poiData.latitude
                 longitude = poiData.longitude

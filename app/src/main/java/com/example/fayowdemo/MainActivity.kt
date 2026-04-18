@@ -859,7 +859,9 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
     private fun startLocationService() {
         if (!permissionManager.hasFineLocationPermission()) return
-        val serviceIntent = Intent(this, LocationService::class.java)
+        val serviceIntent = Intent(this, LocationService::class.java).apply {
+            putExtra("isModerator", authManager.isModerator)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(serviceIntent)
         } else {

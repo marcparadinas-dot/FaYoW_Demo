@@ -126,7 +126,7 @@ class PoiRepository {
                     val lat     = doc.getDouble("lat") ?: continue
                     val lng     = doc.getDouble("lng") ?: continue
                     val message = doc.getString("message") ?: continue
-                    poiMap[doc.id] = PoiData(lat, lng, message, status) // ← on passe le statut
+                    poiMap[doc.id] = PoiData(lat, lng, message, status, doc.getString("creatorUid"))
                 }
                 Log.d("PoiRepository", "${poiMap.size} POIs chargés pour le cache")
                 onSuccess(poiMap)

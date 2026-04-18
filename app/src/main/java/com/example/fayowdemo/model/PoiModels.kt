@@ -22,7 +22,8 @@ data class PoiData(
     val latitude: Double,
     val longitude: Double,
     val message: String,
-    val status: PoiStatus = PoiStatus.VALIDATED // ← ajouté
+    val status: PoiStatus = PoiStatus.VALIDATED,
+    val creatorUid: String? = null
 )
 // --- Enum ---
 
