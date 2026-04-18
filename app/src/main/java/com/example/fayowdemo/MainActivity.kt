@@ -473,11 +473,15 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
         startLocationUpdates()
 
-        // La carte est prête et les receivers sont enregistrés (onStart déjà appelé) →
-        // on signale au service que MainActivity est active.
-        // C'est le bon moment : le service existe déjà et peut recevoir le broadcast.
-        LocalBroadcastManager.getInstance(this)
-            .sendBroadcast(Intent(LocationService.ACTION_MAIN_STARTED))
+        // Envoie ACTION_MAIN_STARTED avec retries pour absorber la race condition
+        // entre onMapReady et le démarrage effectif de LocationService
+        val bm = LocalBroadcastManager.getInstance(this)
+        val mainStartedIntent = Intent(LocationService.ACTION_MAIN_STARTED)
+        bm.sendBroadcast(mainStartedIntent)
+        Handler(Looper.getMainLooper()).postDelayed({ bm.sendBroadcast(mainStartedIntent) }, 1000)
+        Handler(Looper.getMainLooper()).postDelayed({ bm.sendBroadcast(mainStartedIntent) }, 2000)
+        Handler(Looper.getMainLooper()).postDelayed({ bm.sendBroadcast(mainStartedIntent) }, 3000)
+        Handler(Looper.getMainLooper()).postDelayed({ bm.sendBroadcast(mainStartedIntent) }, 5000)
 
         Log.d("MainActivity", "Carte prête, ACTION_MAIN_STARTED envoyé")
     }
