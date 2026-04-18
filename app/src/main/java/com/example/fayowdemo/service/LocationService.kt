@@ -214,6 +214,9 @@ class LocationService : Service(), TextToSpeech.OnInitListener {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d("LocationService", "Service démarré/redémarré")
+        // MainActivity est forcément active puisqu'elle vient de démarrer le service
+        mainActivityActive = true
+        envoyerSyncEtat()
         return START_STICKY
     }
 
