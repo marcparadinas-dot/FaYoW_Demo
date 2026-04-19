@@ -45,7 +45,7 @@ class MapManager(private val context: Context) {
     }
 
     // -------------------------------------------------------------------------
-    // Affichage des POIs
+    // Affichage des POIs — Mode Normal
     // -------------------------------------------------------------------------
 
     /**
@@ -125,6 +125,105 @@ class MapManager(private val context: Context) {
         location?.let { updateLocationMarker(map, it, currentAzimuth) }
     }
 
+    // -------------------------------------------------------------------------
+    // Affichage des POIs — Mode Parcourir
+    // -------------------------------------------------------------------------
+
+    /**
+     * Mode Parcourir : affiche l'historique de l'utilisateur sur la carte.
+     *
+     * Couleurs :
+     * - Vert   : POIs VALIDATED déjà lus par l'utilisateur → cliquables (dialog texte)
+     * - Orange : POIs INITIATED (brouillons de l'utilisateur) → cliquables (édition)
+     * - Gris   : POIs PROPOSED → affichés, non cliquables
+     *
+     * Pas de marqueur de position. La caméra est centrée une seule fois sur la
+     * position de l'utilisateur, sans recentrage automatique par la suite.
+     *
+     * @return Map poiId → message, uniquement pour les cercles verts (lus).
+     */
+    fun afficherCarteParcourir(
+        map: GoogleMap,
+        tousLesPois: List<PointInteret>,
+        poisLusIds: Set<String>,
+        location: Location?
+    ): Map<String, String> {
+
+        map.clear()
+        locationMarker = null
+        poiCircles.clear()
+
+        val poisLusMessages = mutableMapOf<String, String>() // id → message (cercles verts)
+
+        for (poi in tousLesPois) {
+            val (strokeColor, fillColor, isClickable) = when {
+
+                // Vert : POIs VALIDATED déjà lus par l'utilisateur
+                poi.status == PoiStatus.VALIDATED && poisLusIds.contains(poi.id) -> Triple(
+                    Color.argb(220, 46, 125, 50),
+                    Color.argb(140, 76, 175, 80),
+                    true
+                )
+
+                // Orange : POIs INITIATED (brouillons), cliquables pour édition
+                poi.status == PoiStatus.INITIATED -> Triple(
+                    Color.argb(220, 230, 81, 0),
+                    Color.argb(140, 255, 152, 0),
+                    true
+                )
+
+                // Gris : POIs PROPOSED, non cliquables
+                poi.status == PoiStatus.PROPOSED -> Triple(
+                    Color.argb(180, 97, 97, 97),
+                    Color.argb(100, 158, 158, 158),
+                    false
+                )
+
+                // VALIDATED non lus : absents du mode Parcourir
+                else -> continue
+            }
+
+            val circle = map.addCircle(
+                CircleOptions()
+                    .center(poi.position)
+                    .radius(20.0)
+                    .strokeColor(strokeColor)
+                    .fillColor(fillColor)
+                    .strokeWidth(3f)
+                    .clickable(isClickable)
+            )
+            circle.tag = poi.id
+            poiCircles[poi.id] = circle
+
+            // Mémoriser le message des POIs lus (cercles verts) pour le dialog
+            if (poi.status == PoiStatus.VALIDATED && poisLusIds.contains(poi.id)) {
+                poisLusMessages[poi.id] = poi.message
+            }
+
+            // Pour les brouillons INITIATED : afficher le marqueur orange (comme en mode normal)
+            if (poi.status == PoiStatus.INITIATED) {
+                val snippet = poi.message.take(30) + if (poi.message.length > 30) "..." else ""
+                map.addMarker(
+                    MarkerOptions()
+                        .position(poi.position)
+                        .title(snippet)
+                        .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_ORANGE))
+                        .alpha(0.7f)
+                )?.showInfoWindow()
+            }
+        }
+
+        // Centrer la carte sur la position de l'utilisateur — une seule fois, sans suivi
+        location?.let {
+            map.moveCamera(
+                CameraUpdateFactory.newLatLngZoom(LatLng(it.latitude, it.longitude), 16f)
+            )
+        }
+
+        Log.d("MapManager", "Mode Parcourir : ${poisLusMessages.size} POIs lus affichés")
+        return poisLusMessages
+    }
+
     /** Supprime visuellement un cercle de POI (après lecture). */
     fun supprimerCerclePoi(poiId: String) {
         poiCircles[poiId]?.remove()
@@ -138,6 +237,7 @@ class MapManager(private val context: Context) {
     /**
      * Crée ou déplace le marqueur de position de l'utilisateur.
      * Anime la caméra pour suivre le déplacement.
+     * Ne doit être appelée qu'en mode normal (pas en mode Parcourir).
      */
     fun updateLocationMarker(map: GoogleMap, location: Location, azimuth: Float) {
         if (!::bitmapCache.isInitialized) {

@@ -6,7 +6,6 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <!-- android:background="?attr/colorPrimary"-->
     <!-- Toolbar en haut -->
     <androidx.appcompat.widget.Toolbar
         android:id="@+id/toolbar"
@@ -21,7 +20,7 @@
         app:subtitle=""
         app:subtitleTextColor="@android:color/white" />
 
-<!-- Fragment de carte -->
+    <!-- Fragment de carte -->
     <fragment
         android:id="@+id/map"
         android:name="com.google.android.gms.maps.SupportMapFragment"
@@ -55,8 +54,7 @@
         app:layout_constraintBottom_toTopOf="@id/toolbarBottom"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <!-- Toolbar agrandie en bas de l'écran (maintenant un ConstraintLayout) -->
-    <!-- android:background="#FFFFFF" -->
+    <!-- Barre du bas -->
     <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@+id/toolbarBottom"
         android:layout_width="0dp"
@@ -66,26 +64,51 @@
         android:padding="16dp"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintHorizontal_bias="0.0"
         app:layout_constraintStart_toStartOf="parent">
 
-        <!-- Bouton Réafficher (centré en haut de la toolbarBottom) -->
+        <!--
+            btnReafficher : aligné à gauche
+            btnParcourir  : aligné à droite
+            Ils sont côte à côte sur la même ligne (constraintTop_toTopOf="parent").
+            Le texte de btnParcourir est géré dynamiquement depuis MainActivity.kt :
+              - Mode normal  → getString(R.string.btn_parcourir)  "🗺️ Parcourir mes anecdotes"
+              - Mode Parcourir → getString(R.string.btn_retour)   "⬅️ Retour à la carte"
+        -->
 
-        <!-- Bouton Déconnexion (aligné à droite, juste sous le bouton Réafficher) -->
-
+        <!-- Bouton Réafficher (gauche) -->
         <Button
             android:id="@+id/btnReafficher"
-            android:layout_width="350dp"
-            android:layout_height="50dp"
+            android:layout_width="0dp"
+            android:layout_height="70dp"
+            android:layout_marginEnd="4dp"
             android:backgroundTint="@color/design_default_color_primary"
-            android:text="🔄 Réafficher des anecdotes"
+            android:text="@string/btn_reafficher"
             android:textAllCaps="false"
             android:textColor="@android:color/white"
-            android:textSize="16sp"
-            app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintHorizontal_bias="1.0"
+            android:textSize="14sp"
+            app:layout_constraintEnd_toStartOf="@id/btnParcourir"
             app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toTopOf="parent" />
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintWidth_percent="0.5" />
 
+        <!-- Bouton Parcourir (droite) — texte piloté depuis MainActivity -->
+        <Button
+            android:id="@+id/btnParcourir"
+            android:layout_width="0dp"
+            android:layout_height="70dp"
+            android:layout_marginStart="4dp"
+            android:backgroundTint="@color/design_default_color_primary"
+            android:text="@string/btn_parcourir"
+            android:textAllCaps="false"
+            android:textColor="@android:color/white"
+            android:textSize="14sp"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toEndOf="@id/btnReafficher"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintWidth_percent="0.5" />
+
+        <!-- Bouton Déconnexion (bas droite) -->
         <Button
             android:id="@+id/btnLogout"
             android:layout_width="wrap_content"
@@ -94,12 +117,11 @@
             android:text="Déconnexion"
             android:textColor="@android:color/white"
             android:textSize="14sp"
-            app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintTop_toBottomOf="@id/btnReafficher"
             app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintVertical_bias="0.0" /> <!-- Pousse vers le haut -->
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/btnParcourir"
+            app:layout_constraintVertical_bias="0.0" />
+
     </androidx.constraintlayout.widget.ConstraintLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>
-
-

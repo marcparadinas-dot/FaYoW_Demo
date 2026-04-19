@@ -65,6 +65,19 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     private var pointsInteretCharges = false
 
     // -------------------------------------------------------------------------
+    // Mode Parcourir
+    // -------------------------------------------------------------------------
+
+    /** true quand l'utilisateur est en mode Parcourir, false en mode normal. */
+    private var isModeParcourir = false
+
+    /**
+     * Map poiId → message pour les POIs lus (cercles verts) en mode Parcourir.
+     * Sert à alimenter le dialog de lecture sans relire la liste complète.
+     */
+    private val poisLusMessagesParcourir = mutableMapOf<String, String>()
+
+    // -------------------------------------------------------------------------
     // Carte
     // -------------------------------------------------------------------------
 
@@ -107,10 +120,15 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
      * POI_DECLENCHE :
      *   utteranceDone=false → afficher le dialog
      *   utteranceDone=true  → fermer le dialog
+     *
+     * Ignoré en mode Parcourir (pas de TTS dans ce mode).
      */
     private val poiDeclencheReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != LocationService.ACTION_POI_DECLENCHE) return
+
+            // En mode Parcourir, on n'affiche pas les dialogs TTS
+            if (isModeParcourir) return
 
             val utteranceDone = intent.getBooleanExtra("utteranceDone", false)
 
@@ -146,10 +164,12 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
     /**
      * POI_LU : POI VALIDATED marqué lu dans Firestore → supprimer le cercle.
+     * Ignoré en mode Parcourir (la carte Parcourir est statique).
      */
     private val poiLuReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != LocationService.ACTION_POI_LU) return
+            if (isModeParcourir) return
             val poiId = intent.getStringExtra("poiId") ?: return
             Log.d("MainActivity", "POI lu reçu : $poiId")
             poisLusIds.add(poiId)
@@ -160,10 +180,12 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     /**
      * SYNC_ETAT : reçu depuis LocationService après ACTION_MAIN_STARTED.
      * Contient les IDs lus pendant la veille → met à jour la carte.
+     * Ignoré en mode Parcourir.
      */
     private val syncEtatReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != LocationService.ACTION_SYNC_ETAT) return
+            if (isModeParcourir) return
             @Suppress("UNCHECKED_CAST")
             val ids = intent.getSerializableExtra("poisLusPendantVeille") as? HashSet<String>
                 ?: return
@@ -254,7 +276,12 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_UI)
         sensorManager.registerListener(this, magnetometer,  SensorManager.SENSOR_DELAY_UI)
 
-        if (permissionManager.hasAllLocationPermissions() && isAuthenticated && ::mMap.isInitialized) {
+        // En mode Parcourir, pas de recentrage automatique → ne pas relancer les updates
+        if (!isModeParcourir
+            && permissionManager.hasAllLocationPermissions()
+            && isAuthenticated
+            && ::mMap.isInitialized
+        ) {
             startLocationUpdates()
         }
     }
@@ -319,13 +346,13 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         authManager.onSignInSuccess = {
             isAuthenticated      = true
             pointsInteretCharges = false
+            isModeParcourir      = false
             poisLusIds.clear()
             pointsDejaDeclenches.clear()
             pointsInteret.clear()
+            poisLusMessagesParcourir.clear()
             currentDialog?.dismiss()
             currentDialog = null
-            // Relancer l'Activity proprement pour éviter le freeze dû au
-            // mélange Compose/XML et à l'état du fragment manager
             val intent = Intent(this, MainActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
             }
@@ -335,9 +362,11 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         authManager.onSignUpSuccess = {
             isAuthenticated      = true
             pointsInteretCharges = false
+            isModeParcourir      = false
             poisLusIds.clear()
             pointsDejaDeclenches.clear()
             pointsInteret.clear()
+            poisLusMessagesParcourir.clear()
             currentDialog?.dismiss()
             currentDialog = null
             val intent = Intent(this, MainActivity::class.java).apply {
@@ -348,9 +377,11 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         }
         authManager.onSignOutComplete = {
             isAuthenticated = false
+            isModeParcourir = false
             poisLusIds.clear()
             pointsDejaDeclenches.clear()
             pointsInteret.clear()
+            poisLusMessagesParcourir.clear()
             currentLocation = null
             locationCallback = null
             currentDialog?.dismiss()
@@ -358,7 +389,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             stopLocationService()
             stopLocationUpdates()
             Toast.makeText(this, "Déconnecté", Toast.LENGTH_SHORT).show()
-            // Relancer proprement pour retrouver un état vierge
             val intent = Intent(this, MainActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
             }
@@ -417,6 +447,11 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             authManager.signOut()
         }
 
+        // Bouton Parcourir : bascule entre le mode normal et le mode Parcourir
+        findViewById<Button>(R.id.btnParcourir)?.setOnClickListener {
+            if (isModeParcourir) quitterModeParcourir() else entrerModeParcourir()
+        }
+
         authManager.checkIfModerator()
 
         if (!::fusedLocationClient.isInitialized) {
@@ -434,7 +469,9 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 override fun onLocationResult(locationResult: LocationResult) {
                     val location = locationResult.lastLocation ?: return
                     currentLocation = location
-                    if (::mMap.isInitialized) {
+                    // En mode Parcourir, on met à jour currentLocation mais on
+                    // ne déplace pas le marqueur (absent) ni la caméra
+                    if (!isModeParcourir && ::mMap.isInitialized) {
                         mapManager.updateLocationMarker(mMap, location, currentAzimuth)
                     }
                 }
@@ -455,11 +492,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         mMap = googleMap
         mapManager.initialiserCarte(mMap)
 
-        mMap.setOnCircleClickListener { circle ->
-            val poiId = circle.tag as? String ?: return@setOnCircleClickListener
-            val poi = pointsInteret.find { it.id == poiId } ?: return@setOnCircleClickListener
-            if (poi.status == PoiStatus.INITIATED) showEditMyPoiDialog(poi)
-        }
+        // Listener de clic par défaut (mode normal) : uniquement les INITIATED
+        installerListenerClicModeNormal()
 
         if (!permissionManager.hasFineLocationPermission()) {
             permissionManager.demanderPermissions()
@@ -490,6 +524,123 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         Handler(Looper.getMainLooper()).postDelayed({ bm.sendBroadcast(mainStartedIntent) }, 5000)
 
         Log.d("MainActivity", "Carte prête, ACTION_MAIN_STARTED envoyé")
+    }
+
+    // =========================================================================
+    // Listeners de clic sur les cercles (factorisés)
+    // =========================================================================
+
+    /**
+     * Mode normal : seuls les cercles INITIATED sont cliquables (édition brouillon).
+     */
+    private fun installerListenerClicModeNormal() {
+        mMap.setOnCircleClickListener { circle ->
+            val poiId = circle.tag as? String ?: return@setOnCircleClickListener
+            val poi = pointsInteret.find { it.id == poiId } ?: return@setOnCircleClickListener
+            if (poi.status == PoiStatus.INITIATED) showEditMyPoiDialog(poi)
+        }
+    }
+
+    /**
+     * Mode Parcourir :
+     * - Cercles verts (VALIDATED lus) → dialog de lecture (texte, sans TTS)
+     * - Cercles orange (INITIATED)    → dialog d'édition (même comportement qu'en mode normal)
+     */
+    private fun installerListenerClicModeParcourir() {
+        mMap.setOnCircleClickListener { circle ->
+            val poiId = circle.tag as? String ?: return@setOnCircleClickListener
+
+            // Cercle vert : POI lu → afficher le texte
+            val messageLu = poisLusMessagesParcourir[poiId]
+            if (messageLu != null) {
+                afficherDialogPoiLu(messageLu)
+                return@setOnCircleClickListener
+            }
+
+            // Cercle orange : POI INITIATED → édition
+            val poi = pointsInteret.find { it.id == poiId } ?: return@setOnCircleClickListener
+            if (poi.status == PoiStatus.INITIATED) showEditMyPoiDialog(poi)
+        }
+    }
+
+    // =========================================================================
+    // Mode Parcourir
+    // =========================================================================
+
+    /**
+     * Bascule vers le mode Parcourir :
+     * - Arrête le suivi de position (la carte ne se recentre plus)
+     * - Affiche les POIs lus (vert), initiés (orange), proposés (gris)
+     * - Installe le listener adapté
+     * - Met à jour le libellé du bouton
+     */
+    private fun entrerModeParcourir() {
+        isModeParcourir = true
+
+        // Arrêter le suivi GPS → la caméra ne suivra plus l'utilisateur
+        stopLocationUpdates()
+
+        // Afficher la carte Parcourir et récupérer les messages des POIs lus
+        poisLusMessagesParcourir.clear()
+        poisLusMessagesParcourir.putAll(
+            mapManager.afficherCarteParcourir(
+                mMap, pointsInteret, poisLusIds, currentLocation
+            )
+        )
+
+        // Installer le listener adapté au mode Parcourir
+        installerListenerClicModeParcourir()
+
+        // Mettre à jour le bouton
+        findViewById<Button>(R.id.btnParcourir)?.text = getString(R.string.btn_retour)
+
+        // Masquer les boutons non pertinents en mode Parcourir
+        findViewById<Button>(R.id.btnReafficher)?.visibility = View.GONE
+
+        Log.d("MainActivity", "Mode Parcourir activé")
+    }
+
+    /**
+     * Quitte le mode Parcourir et restaure le mode normal :
+     * - Redessine la carte normale
+     * - Reprend le suivi GPS
+     * - Restaure le listener de clic normal
+     * - Remet à jour le libellé du bouton
+     */
+    private fun quitterModeParcourir() {
+        isModeParcourir = false
+
+        // Redessiner la carte normale
+        mapManager.rafraichirCarte(
+            mMap, pointsInteret, poisLusIds,
+            pointsDejaDeclenches, currentLocation, currentAzimuth
+        )
+
+        // Reprendre le suivi GPS → la caméra suit à nouveau l'utilisateur
+        startLocationUpdates()
+
+        // Restaurer le listener normal
+        installerListenerClicModeNormal()
+
+        // Mettre à jour le bouton
+        findViewById<Button>(R.id.btnParcourir)?.text = getString(R.string.btn_parcourir)
+
+        // Réafficher les boutons masqués
+        findViewById<Button>(R.id.btnReafficher)?.visibility = View.VISIBLE
+
+        Log.d("MainActivity", "Mode Parcourir désactivé")
+    }
+
+    /**
+     * Dialog de lecture d'un POI lu (mode Parcourir, cercles verts).
+     * Pas de TTS — affichage texte uniquement.
+     */
+    private fun afficherDialogPoiLu(message: String) {
+        AlertDialog.Builder(this)
+            .setTitle("Anecdote déjà lue")
+            .setMessage(message)
+            .setPositiveButton("Fermer", null)
+            .show()
     }
 
     // =========================================================================
@@ -834,7 +985,9 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                     override fun onLocationResult(locationResult: LocationResult) {
                         val location = locationResult.lastLocation ?: return
                         currentLocation = location
-                        if (::mMap.isInitialized) {
+                        // En mode Parcourir, on mémorise la position mais sans
+                        // déplacer le marqueur ni recentrer la caméra
+                        if (!isModeParcourir && ::mMap.isInitialized) {
                             mapManager.updateLocationMarker(mMap, location, currentAzimuth)
                         }
                     }

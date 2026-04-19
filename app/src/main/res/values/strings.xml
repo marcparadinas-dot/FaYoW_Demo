@@ -1,3 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Fayow demo</string>
+    <string name="app_name">FayowDemo</string>
+
+    <!-- Bouton Parcourir / Retour -->
+    <string name="btn_parcourir">🗺️ Parcourir mes anecdotes</string>
+    <string name="btn_retour">⬅️ Retour à la carte</string>
+
+    <!-- Bouton Réafficher -->
+    <string name="btn_reafficher">🔄 Réafficher des anecdotes</string>
 </resources>
