@@ -42,9 +42,6 @@ import com.google.android.gms.maps.OnMapReadyCallback
 import com.google.android.gms.maps.SupportMapFragment
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.Marker
-import android.view.GestureDetector
-import android.view.MotionEvent
-import androidx.core.view.GestureDetectorCompat
 
 @RequiresApi(Build.VERSION_CODES.CUPCAKE)
 class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListener {
@@ -576,64 +573,50 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
      * Clic long sur un cercle INITIATED → démarre le drag.
      * Actif dans les deux modes (normal et Parcourir).
      *
-     * setOnCircleLongClickListener est absent/buggé dans le SDK Maps Android
-     * malgré la dépendance 18.x. On passe par un GestureDetector sur la MapView :
-     * au onLongPress, on projette les coordonnées pixel → LatLng, puis on cherche
-     * le POI INITIATED le plus proche dans un rayon de tolérance (~40px).
+     * On utilise setOnMapLongClickListener (API native et fiable) :
+     * Maps nous donne directement le LatLng du point pressé longtemps.
+     * On projette ensuite chaque centre de POI en pixels écran et on mesure
+     * la distance en pixels pour trouver le cercle touché — indépendant du zoom.
      */
     private fun installerListenerClicLong() {
-        val mapFragment = supportFragmentManager.findFragmentById(R.id.map) as? SupportMapFragment
-        val mapView = mapFragment?.view ?: return
+        mMap.setOnMapLongClickListener { touchLatLng ->
 
-        val gestureDetector = GestureDetectorCompat(
-            this,
-            object : GestureDetector.SimpleOnGestureListener() {
-                override fun onLongPress(e: MotionEvent) {
-                    // Convertir les coordonnées pixel du toucher en LatLng sur la carte
-                    val touchLatLng = mMap.projection.fromScreenLocation(
-                        android.graphics.Point(e.x.toInt(), e.y.toInt())
-                    )
+            val uid = authManager.getCurrentUser()?.uid
 
-                    // Chercher le POI INITIATED le plus proche du point touché
-                    val uid = authManager.getCurrentUser()?.uid
-                    val poiCible = pointsInteret
-                        .filter { it.status == PoiStatus.INITIATED && it.creatorUid == uid }
-                        .minByOrNull { poi ->
-                            // Distance en mètres entre le toucher et le centre du cercle
-                            val result = FloatArray(1)
-                            Location.distanceBetween(
-                                touchLatLng.latitude, touchLatLng.longitude,
-                                poi.position.latitude, poi.position.longitude,
-                                result
-                            )
-                            result[0]
-                        } ?: return
+            // Projeter le point touché en pixels écran
+            val touchPoint = mMap.projection.toScreenLocation(touchLatLng)
 
-                    // Vérifier que le toucher est bien dans le cercle (rayon 20m + marge tactile ~5m)
-                    val distResult = FloatArray(1)
-                    Location.distanceBetween(
-                        touchLatLng.latitude, touchLatLng.longitude,
-                        poiCible.position.latitude, poiCible.position.longitude,
-                        distResult
-                    )
-                    if (distResult[0] > 40f) return // Trop loin, ignorer
+            // Seuil de détection en pixels (rayon tactile confortable)
+            val seuilPixels = 80
 
-                    // Démarrer le drag via MapManager
-                    mapManager.demarrerDragPoi(mMap, poiCible)
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Faites glisser pour repositionner",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }
-            }
-        )
+            // Chercher le POI INITIATED de l'utilisateur dont le centre
+            // projeté en pixels est le plus proche du toucher
+            val poiCible = pointsInteret
+                .filter { it.status == PoiStatus.INITIATED && it.creatorUid == uid }
+                .minByOrNull { poi ->
+                    val centrePixels = mMap.projection.toScreenLocation(poi.position)
+                    val dx = (touchPoint.x - centrePixels.x).toDouble()
+                    val dy = (touchPoint.y - centrePixels.y).toDouble()
+                    Math.sqrt(dx * dx + dy * dy)
+                } ?: return@setOnMapLongClickListener
 
-        // Attacher le GestureDetector à la MapView en laissant passer tous les events
-        // (retourner false pour ne pas consommer l'event et laisser la carte fonctionner normalement)
-        mapView.setOnTouchListener { _, event ->
-            gestureDetector.onTouchEvent(event)
-            false
+            // Vérifier que le centre projeté est bien dans le seuil
+            val centrePixels = mMap.projection.toScreenLocation(poiCible.position)
+            val dx = (touchPoint.x - centrePixels.x).toDouble()
+            val dy = (touchPoint.y - centrePixels.y).toDouble()
+            val distPixels = Math.sqrt(dx * dx + dy * dy)
+
+            if (distPixels > seuilPixels) return@setOnMapLongClickListener
+
+            Log.d("MainActivity", "Clic long sur POI ${poiCible.id} (dist: ${"%.1f".format(distPixels)}px)")
+
+            // Démarrer le drag via MapManager
+            mapManager.demarrerDragPoi(mMap, poiCible)
+            Toast.makeText(
+                this,
+                "Faites glisser pour repositionner",
+                Toast.LENGTH_SHORT
+            ).show()
         }
     }
 
