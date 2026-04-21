@@ -537,8 +537,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
     /**
      * Mode Parcourir :
-     * - Cercles verts (VALIDATED lus) → dialog de lecture (texte, sans TTS)
-     * - Cercles orange (INITIATED)    → dialog d'édition (même comportement qu'en mode normal)
+     * - Cercles verts (VALIDATED lus)      → dialog de lecture (texte, sans TTS)
+     * - Cercles orange (INITIATED)         → dialog d'édition
+     * - Cercles violets (VALIDATED, modo)  → dialog de modération
+     * - Cercles gris (PROPOSED, modo)      → dialog de modération
      */
     private fun installerListenerClicModeParcourir() {
         mMap.setOnCircleClickListener { circle ->
@@ -551,9 +553,18 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 return@setOnCircleClickListener
             }
 
-            // Cercle orange : POI INITIATED → édition
             val poi = pointsInteret.find { it.id == poiId } ?: return@setOnCircleClickListener
-            if (poi.status == PoiStatus.INITIATED) showEditMyPoiDialog(poi)
+
+            when {
+                // Cercle orange : POI INITIATED → édition brouillon
+                poi.status == PoiStatus.INITIATED -> showEditMyPoiDialog(poi)
+
+                // Modérateur sur VALIDATED ou PROPOSED → modération
+                authManager.isModerator && (poi.status == PoiStatus.VALIDATED
+                        || poi.status == PoiStatus.PROPOSED) -> {
+                    showPoiEditDialog(PendingPoi(id = poi.id, message = poi.message))
+                }
+            }
         }
     }
 
@@ -591,19 +602,33 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             this,
             object : GestureDetector.SimpleOnGestureListener() {
                 override fun onLongPress(e: MotionEvent) {
+                    // Drag uniquement en mode Parcourir
+                    if (!isModeParcourir) return
+
                     val uid = authManager.getCurrentUser()?.uid ?: return
                     val touchPt = android.graphics.Point(e.x.toInt(), e.y.toInt())
                     val seuilPx = 120
 
-                    // Chercher le POI INITIATED de l'utilisateur le plus proche en pixels
-                    val poiCible = pointsInteret
-                        .filter { it.status == PoiStatus.INITIATED && it.creatorUid == uid }
-                        .minByOrNull { poi ->
-                            val c = mMap.projection.toScreenLocation(poi.position)
-                            val dx = (touchPt.x - c.x).toDouble()
-                            val dy = (touchPt.y - c.y).toDouble()
-                            Math.sqrt(dx * dx + dy * dy)
-                        } ?: return
+                    // Candidats déplaçables selon le profil :
+                    // - Utilisateur normal : ses POIs INITIATED
+                    // - Modérateur        : ses POIs INITIATED + tous les VALIDATED
+                    val candidats = if (authManager.isModerator) {
+                        pointsInteret.filter {
+                            (it.status == PoiStatus.INITIATED && it.creatorUid == uid)
+                                    || it.status == PoiStatus.VALIDATED
+                        }
+                    } else {
+                        pointsInteret.filter {
+                            it.status == PoiStatus.INITIATED && it.creatorUid == uid
+                        }
+                    }
+
+                    val poiCible = candidats.minByOrNull { poi ->
+                        val c = mMap.projection.toScreenLocation(poi.position)
+                        val dx = (touchPt.x - c.x).toDouble()
+                        val dy = (touchPt.y - c.y).toDouble()
+                        Math.sqrt(dx * dx + dy * dy)
+                    } ?: return
 
                     val centre = mMap.projection.toScreenLocation(poiCible.position)
                     val dx = (touchPt.x - centre.x).toDouble()
@@ -739,7 +764,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         poisLusMessagesParcourir.clear()
         poisLusMessagesParcourir.putAll(
             mapManager.afficherCarteParcourir(
-                mMap, pointsInteret, poisLusIds, currentLocation
+                mMap, pointsInteret, poisLusIds, currentLocation,
+                isModerator = authManager.isModerator
             )
         )
 

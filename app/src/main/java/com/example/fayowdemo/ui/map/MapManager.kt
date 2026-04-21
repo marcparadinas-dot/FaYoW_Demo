@@ -165,55 +165,69 @@ class MapManager(private val context: Context) {
      * Mode Parcourir : affiche l'historique de l'utilisateur sur la carte.
      *
      * Couleurs :
-     * - Vert   : POIs VALIDATED déjà lus par l'utilisateur → cliquables (dialog texte)
-     * - Orange : POIs INITIATED (brouillons de l'utilisateur) → cliquables (édition + déplaçables)
-     * - Gris   : POIs PROPOSED → affichés, non cliquables
+     * - Vert    : POIs VALIDATED déjà lus par l'utilisateur → cliquables (dialog texte)
+     * - Orange  : POIs INITIATED (brouillons de l'utilisateur) → cliquables (édition) + déplaçables
+     * - Gris    : POIs PROPOSED → cliquables pour modérateur, non cliquables sinon
+     * - Violet  : POIs VALIDATED non lus → affichés uniquement pour le modérateur, cliquables
      *
      * Pas de marqueur de position. La caméra est centrée une seule fois sur la
      * position de l'utilisateur, sans recentrage automatique par la suite.
      *
-     * @return Map poiId → message, uniquement pour les cercles verts (lus).
+     * @param isModerator  Si true, affiche aussi les VALIDATED non lus (violet) et
+     *                     rend les PROPOSED cliquables.
+     * @return Map poiId → message, pour les cercles verts (lus) et violets (modérateur).
      */
     fun afficherCarteParcourir(
         map: GoogleMap,
         tousLesPois: List<PointInteret>,
         poisLusIds: Set<String>,
-        location: Location?
+        location: Location?,
+        isModerator: Boolean = false
     ): Map<String, String> {
 
-        annulerDragSiEnCours() // Nettoyer tout drag en cours avant de redessiner
+        annulerDragSiEnCours()
 
         map.clear()
         locationMarker = null
         poiCircles.clear()
 
-        val poisLusMessages = mutableMapOf<String, String>() // id → message (cercles verts)
+        val poisMessages = mutableMapOf<String, String>() // id → message cliquables (vert + violet modo)
 
         for (poi in tousLesPois) {
+
+            val estLu = poisLusIds.contains(poi.id)
+
             val (strokeColor, fillColor, isClickable) = when {
 
-                // Vert : POIs VALIDATED déjà lus par l'utilisateur
-                poi.status == PoiStatus.VALIDATED && poisLusIds.contains(poi.id) -> Triple(
+                // Vert : VALIDATED déjà lus → cliquables (dialog texte)
+                poi.status == PoiStatus.VALIDATED && estLu -> Triple(
                     Color.argb(220, 46, 125, 50),
                     Color.argb(140, 76, 175, 80),
                     true
                 )
 
-                // Orange : POIs INITIATED (brouillons), cliquables + déplaçables via clic long
+                // Violet : VALIDATED non lus → modérateur uniquement, cliquables + déplaçables
+                poi.status == PoiStatus.VALIDATED && !estLu && isModerator -> Triple(
+                    Color.argb(80, 190, 30, 250),
+                    Color.argb(40, 190, 30, 250),
+                    true
+                )
+
+                // Orange : INITIATED → cliquables (édition) + déplaçables
                 poi.status == PoiStatus.INITIATED -> Triple(
                     Color.argb(220, 230, 81, 0),
                     Color.argb(140, 255, 152, 0),
                     true
                 )
 
-                // Gris : POIs PROPOSED, non cliquables
+                // Gris : PROPOSED → cliquables pour modérateur, non cliquables sinon
                 poi.status == PoiStatus.PROPOSED -> Triple(
                     Color.argb(180, 97, 97, 97),
                     Color.argb(100, 158, 158, 158),
-                    false
+                    isModerator
                 )
 
-                // VALIDATED non lus : absents du mode Parcourir
+                // VALIDATED non lus pour utilisateur normal : absents
                 else -> continue
             }
 
@@ -229,12 +243,14 @@ class MapManager(private val context: Context) {
             circle.tag = poi.id
             poiCircles[poi.id] = circle
 
-            // Mémoriser le message des POIs lus (cercles verts) pour le dialog
-            if (poi.status == PoiStatus.VALIDATED && poisLusIds.contains(poi.id)) {
-                poisLusMessages[poi.id] = poi.message
+            // Mémoriser le message des POIs cliquables pour dialog texte :
+            // - cercles verts (lus par l'utilisateur)
+            // - cercles violets (modérateur sur VALIDATED non lus)
+            if (poi.status == PoiStatus.VALIDATED) {
+                poisMessages[poi.id] = poi.message
             }
 
-            // Pour les brouillons INITIATED : afficher le marqueur orange (comme en mode normal)
+            // Pour les brouillons INITIATED : afficher le marqueur orange
             if (poi.status == PoiStatus.INITIATED) {
                 val snippet = poi.message.take(30) + if (poi.message.length > 30) "..." else ""
                 map.addMarker(
@@ -254,8 +270,8 @@ class MapManager(private val context: Context) {
             )
         }
 
-        Log.d("MapManager", "Mode Parcourir : ${poisLusMessages.size} POIs lus affichés")
-        return poisLusMessages
+        Log.d("MapManager", "Mode Parcourir : ${poisMessages.size} POIs cliquables affichés (modérateur=$isModerator)")
+        return poisMessages
     }
 
     // -------------------------------------------------------------------------
@@ -277,7 +293,8 @@ class MapManager(private val context: Context) {
      * @param poi  Le POI à déplacer
      */
     fun demarrerDragPoi(map: GoogleMap, poi: PointInteret) {
-        if (poi.status != PoiStatus.INITIATED) return
+        // Drag autorisé sur INITIATED (propriétaire) et VALIDATED (modérateur)
+        if (poi.status == PoiStatus.PROPOSED) return
 
         // Si un drag était déjà en cours sur un autre POI, l'annuler proprement
         annulerDragSiEnCours()
