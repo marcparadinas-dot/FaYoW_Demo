@@ -36,10 +36,10 @@ import com.example.fayowdemo.service.LocationService
 import com.example.fayowdemo.ui.PermissionManager
 import com.example.fayowdemo.ui.map.MapManager
 import com.example.fayowdemo.ui.theme.FayowDemoTheme
+import com.example.fayowdemo.ui.map.InterceptMapView
 import com.google.android.gms.location.*
 import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.OnMapReadyCallback
-import com.google.android.gms.maps.SupportMapFragment
 import com.google.android.gms.maps.model.LatLng
 import android.view.GestureDetector
 import android.view.MotionEvent
@@ -232,15 +232,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         magnetometer  = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
 
-        if (savedInstanceState != null) {
-            supportFragmentManager.findFragmentById(R.id.map)?.let { fragment ->
-                supportFragmentManager.beginTransaction()
-                    .remove(fragment)
-                    .commitAllowingStateLoss()
-                supportFragmentManager.executePendingTransactions()
-            }
-        }
-
         if (authManager.isUserLoggedIn()) {
             isAuthenticated = true
             afficherEcranCarte()
@@ -275,6 +266,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         super.onResume()
         sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_UI)
         sensorManager.registerListener(this, magnetometer,  SensorManager.SENSOR_DELAY_UI)
+        // Cycle de vie MapView standalone
+        findViewById<InterceptMapView>(R.id.mapView)?.onResume()
 
         // En mode Parcourir, pas de recentrage automatique → ne pas relancer les updates
         if (!isModeParcourir
@@ -290,9 +283,13 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         super.onPause()
         sensorManager.unregisterListener(this)
         stopLocationUpdates()
+        // Cycle de vie MapView standalone
+        findViewById<InterceptMapView>(R.id.mapView)?.onPause()
     }
 
     override fun onDestroy() {
+        // Cycle de vie MapView standalone
+        findViewById<InterceptMapView>(R.id.mapView)?.onDestroy()
         stopLocationService()
         super.onDestroy()
     }
@@ -317,11 +314,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     }
 
     private fun afficherEcranCarte() {
-        supportFragmentManager.findFragmentById(R.id.map)?.let { fragment ->
-            supportFragmentManager.beginTransaction()
-                .remove(fragment)
-                .commitNowAllowingStateLoss()
-        }
         setContentView(R.layout.activity_main)
         Handler(Looper.getMainLooper()).postDelayed({
             if (permissionManager.hasFineLocationPermission()) {
@@ -477,12 +469,14 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             }
         }
 
-        val mapFragment = supportFragmentManager.findFragmentById(R.id.map) as? SupportMapFragment
-        if (mapFragment != null) {
-            mapFragment.getMapAsync(this)
+        // Initialiser la carte via InterceptMapView (remplace SupportMapFragment)
+        val mapView = findViewById<InterceptMapView>(R.id.mapView)
+        if (mapView != null) {
+            mapView.onCreate(null)
+            mapView.getMapAsync(this)
         } else {
-            Log.e("MainActivity", "Fragment de carte introuvable")
-            Toast.makeText(this, "Erreur : fragment de carte introuvable", Toast.LENGTH_LONG).show()
+            Log.e("MainActivity", "InterceptMapView introuvable")
+            Toast.makeText(this, "Erreur : vue de carte introuvable", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -568,45 +562,38 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     // =========================================================================
 
     // =========================================================================
-    // Drag & Drop continu — GestureDetector sur la MapView
+    // Drag & Drop continu — InterceptMapView + GestureDetector
     // =========================================================================
 
     /**
      * Gère le drag continu d'un POI INITIATED sans relâcher le doigt.
      *
-     * Fonctionnement :
-     * - Un GestureDetector détecte le onLongPress → identifie le cercle INITIATED
-     *   le plus proche en pixels, active le mode drag
-     * - Le setOnTouchListener intercepte ensuite ACTION_MOVE (déplace le cercle
-     *   fantôme en temps réel) et ACTION_UP (affiche le dialog de confirmation)
-     * - Pendant le drag, le scroll de la carte est désactivé pour éviter les
-     *   conflits de geste
+     * On utilise InterceptMapView.touchInterceptor qui reçoit les touches via
+     * dispatchTouchEvent, AVANT que Maps ne les consomme. C'est le seul moyen
+     * fiable d'intercepter les gestes sur une MapView Android.
      *
-     * Le GestureDetector doit recevoir TOUS les events via onTouchListener pour
-     * que onLongPress soit déclenché. On retourne false sauf pendant le drag
-     * (où on retourne true pour capturer les MOVE/UP suivants).
+     * Fonctionnement :
+     * - GestureDetector.onLongPress → identifie le cercle INITIATED le plus
+     *   proche en pixels, démarre le drag, désactive le scroll Maps
+     * - ACTION_MOVE → déplace le cercle fantôme en temps réel
+     * - ACTION_UP   → affiche le dialog de confirmation, réactive le scroll
      */
     @SuppressLint("ClickableViewAccessibility")
     private fun installerGestureDrag() {
-        val mapFragment = supportFragmentManager.findFragmentById(R.id.map) as? SupportMapFragment
-        val mapView = mapFragment?.view ?: run {
-            Log.e("MainActivity", "MapView introuvable pour le gesture drag")
+        val mapView = findViewById<InterceptMapView>(R.id.mapView) ?: run {
+            Log.e("MainActivity", "InterceptMapView introuvable pour le gesture drag")
             return
         }
 
-        // Flag interne : true quand un drag de POI est en cours
         var dragActif = false
 
         val gestureDetector = GestureDetectorCompat(
             this,
             object : GestureDetector.SimpleOnGestureListener() {
-
                 override fun onLongPress(e: MotionEvent) {
                     val uid = authManager.getCurrentUser()?.uid ?: return
-
-                    // Projeter le point touché en pixels écran
                     val touchPt = android.graphics.Point(e.x.toInt(), e.y.toInt())
-                    val seuilPx = 120 // zone de détection généreuse autour du cercle
+                    val seuilPx = 120
 
                     // Chercher le POI INITIATED de l'utilisateur le plus proche en pixels
                     val poiCible = pointsInteret
@@ -618,18 +605,13 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                             Math.sqrt(dx * dx + dy * dy)
                         } ?: return
 
-                    // Vérifier que le toucher est bien dans la zone de détection
                     val centre = mMap.projection.toScreenLocation(poiCible.position)
                     val dx = (touchPt.x - centre.x).toDouble()
                     val dy = (touchPt.y - centre.y).toDouble()
                     if (Math.sqrt(dx * dx + dy * dy) > seuilPx) return
 
                     Log.d("MainActivity", "Drag démarré sur POI ${poiCible.id}")
-
-                    // Désactiver le scroll de la carte pendant le drag
                     mMap.uiSettings.isScrollGesturesEnabled = false
-
-                    // Démarrer le drag visuel dans MapManager (pas de Marker, juste le cercle fantôme)
                     mapManager.demarrerDragPoi(mMap, poiCible)
                     dragActif = true
 
@@ -642,41 +624,41 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             }
         )
 
-        mapView.setOnTouchListener { _, event ->
-            // Toujours alimenter le GestureDetector pour qu'il détecte onLongPress
+        // touchInterceptor reçoit les events via dispatchTouchEvent,
+        // avant que Maps ne les consomme
+        mapView.touchInterceptor = { event ->
+            // Toujours alimenter le GestureDetector pour détecter onLongPress
             gestureDetector.onTouchEvent(event)
 
             if (dragActif) {
                 when (event.action) {
                     MotionEvent.ACTION_MOVE -> {
-                        // Déplacer le cercle fantôme en temps réel
                         val pt = android.graphics.Point(event.x.toInt(), event.y.toInt())
                         val nouvellePos = mMap.projection.fromScreenLocation(pt)
                         mapManager.mettreAJourDragGhost(nouvellePos)
-                        true // Capturer l'event pour éviter le scroll de la carte
+                        true // Capturer → Maps ne scrolle pas
                     }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        // Réactiver le scroll de la carte
+                    MotionEvent.ACTION_UP -> {
                         mMap.uiSettings.isScrollGesturesEnabled = true
                         dragActif = false
-
                         val poiId = mapManager.poiEnDeplacement
-
-                        if (event.action == MotionEvent.ACTION_UP && poiId != null) {
-                            // Récupérer la position finale du cercle fantôme
+                        if (poiId != null) {
                             val pt = android.graphics.Point(event.x.toInt(), event.y.toInt())
-                            val positionFinale = mMap.projection.fromScreenLocation(pt)
-                            afficherDialogConfirmationDeplacement(poiId, positionFinale)
-                        } else {
-                            // ACTION_CANCEL : annuler proprement
-                            mapManager.annulerDrag()
+                            val posFinale = mMap.projection.fromScreenLocation(pt)
+                            afficherDialogConfirmationDeplacement(poiId, posFinale)
                         }
                         true
                     }
-                    else -> false
+                    MotionEvent.ACTION_CANCEL -> {
+                        mMap.uiSettings.isScrollGesturesEnabled = true
+                        dragActif = false
+                        mapManager.annulerDrag()
+                        false
+                    }
+                    else -> true // Capturer tous les autres events pendant le drag
                 }
             } else {
-                false // Pas de drag en cours → laisser Maps gérer normalement
+                false // Pas de drag → Maps gère normalement
             }
         }
     }
