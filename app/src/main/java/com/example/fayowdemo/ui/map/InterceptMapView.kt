@@ -23,11 +23,13 @@ import com.google.android.gms.maps.MapView
  *   val mapView = findViewById<InterceptMapView>(R.id.mapView)
  *   mapView.touchInterceptor = { event -> /* retourner true pour capturer */ }
  */
-class InterceptMapView @JvmOverloads constructor(
+class InterceptMapView(
     context: Context,
-    attrs: AttributeSet? = null,
-    defStyle: Int = 0
-) : MapView(context, attrs, defStyle) {
+    attrs: AttributeSet?
+) : MapView(context, attrs) {
+
+    // Constructeur secondaire pour instanciation programmatique sans AttributeSet
+    constructor(context: Context) : this(context, null)
 
     /**
      * Callback appelé sur chaque MotionEvent AVANT que Maps ne le traite.
