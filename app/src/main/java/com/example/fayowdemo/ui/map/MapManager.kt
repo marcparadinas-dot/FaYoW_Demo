@@ -30,6 +30,35 @@ class MapManager(private val context: Context) {
     private val poiCircles = mutableMapOf<String, Circle>()
 
     // -------------------------------------------------------------------------
+    // État du drag & drop
+    // -------------------------------------------------------------------------
+
+    /**
+     * Marqueur draggable temporaire créé lors d'un clic long sur un cercle INITIATED.
+     * Null quand aucun drag n'est en cours.
+     */
+    private var dragMarker: Marker? = null
+
+    /**
+     * Cercle fantôme affiché sous le marker pendant le drag,
+     * pour visualiser la future position du POI.
+     */
+    private var dragGhostCircle: Circle? = null
+
+    /**
+     * ID du POI en cours de déplacement. Exposé en lecture pour que
+     * MainActivity sache quel POI est concerné lors du onMarkerDragEnd.
+     * Null quand aucun drag n'est en cours.
+     */
+    var poiEnDeplacement: String? = null
+        private set
+
+    /**
+     * Position d'origine du POI avant le drag, pour permettre l'annulation.
+     */
+    private var positionOrigineDrag: LatLng? = null
+
+    // -------------------------------------------------------------------------
     // Initialisation de la carte
     // -------------------------------------------------------------------------
 
@@ -64,6 +93,8 @@ class MapManager(private val context: Context) {
     ) {
         Log.d("MapManager", "Rafraîchissement de la carte avec ${pointsInteret.size} POIs")
 
+        annulerDragSiEnCours() // Nettoyer tout drag en cours avant de redessiner
+
         map.clear()
         locationMarker = null
         poiCircles.clear()
@@ -87,8 +118,8 @@ class MapManager(private val context: Context) {
                     Color.argb(60, 190, 30, 250)
                 )
                 PoiStatus.PROPOSED  -> Pair(
-                    Color.argb(100, 76, 175, 80),
-                    Color.argb(80, 76, 175, 80)
+                    Color.argb(180, 97, 97, 97),
+                    Color.argb(100, 158, 158, 158),
                 )
                 PoiStatus.INITIATED -> Pair(
                     Color.argb(150, 255, 152, 0),
@@ -134,7 +165,7 @@ class MapManager(private val context: Context) {
      *
      * Couleurs :
      * - Vert   : POIs VALIDATED déjà lus par l'utilisateur → cliquables (dialog texte)
-     * - Orange : POIs INITIATED (brouillons de l'utilisateur) → cliquables (édition)
+     * - Orange : POIs INITIATED (brouillons de l'utilisateur) → cliquables (édition + déplaçables)
      * - Gris   : POIs PROPOSED → affichés, non cliquables
      *
      * Pas de marqueur de position. La caméra est centrée une seule fois sur la
@@ -148,6 +179,8 @@ class MapManager(private val context: Context) {
         poisLusIds: Set<String>,
         location: Location?
     ): Map<String, String> {
+
+        annulerDragSiEnCours() // Nettoyer tout drag en cours avant de redessiner
 
         map.clear()
         locationMarker = null
@@ -165,7 +198,7 @@ class MapManager(private val context: Context) {
                     true
                 )
 
-                // Orange : POIs INITIATED (brouillons), cliquables pour édition
+                // Orange : POIs INITIATED (brouillons), cliquables + déplaçables via clic long
                 poi.status == PoiStatus.INITIATED -> Triple(
                     Color.argb(220, 230, 81, 0),
                     Color.argb(140, 255, 152, 0),
@@ -223,6 +256,131 @@ class MapManager(private val context: Context) {
         Log.d("MapManager", "Mode Parcourir : ${poisLusMessages.size} POIs lus affichés")
         return poisLusMessages
     }
+
+    // -------------------------------------------------------------------------
+    // Drag & Drop — déplacement d'un POI INITIATED
+    // -------------------------------------------------------------------------
+
+    /**
+     * Démarre le mode drag pour un POI INITIATED.
+     *
+     * Actions :
+     * 1. Mémorise l'ID et la position d'origine
+     * 2. Masque le cercle d'origine
+     * 3. Crée un cercle fantôme semi-transparent à la même position
+     * 4. Crée un Marker draggable orange au-dessus
+     *
+     * Appelé depuis MainActivity sur clic long d'un cercle INITIATED.
+     *
+     * @param map  La carte Google Maps active
+     * @param poi  Le POI à déplacer
+     * @return     Le Marker draggable créé (MainActivity y attache les listeners de drag)
+     */
+    fun demarrerDragPoi(map: GoogleMap, poi: PointInteret): Marker? {
+        if (poi.status != PoiStatus.INITIATED) return null
+
+        // Si un drag était déjà en cours sur un autre POI, l'annuler proprement
+        annulerDragSiEnCours()
+
+        poiEnDeplacement    = poi.id
+        positionOrigineDrag = poi.position
+
+        // Masquer le cercle d'origine pendant le drag
+        poiCircles[poi.id]?.isVisible = false
+
+        // Cercle fantôme : montre la future position du POI pendant le glissement
+        dragGhostCircle = map.addCircle(
+            CircleOptions()
+                .center(poi.position)
+                .radius(20.0)
+                .strokeColor(Color.argb(220, 255, 100, 0))
+                .fillColor(Color.argb(80, 255, 152, 0))
+                .strokeWidth(4f)
+                .zIndex(10f)
+        )
+
+        // Marqueur draggable — c'est lui que l'utilisateur fait glisser sur la carte
+        dragMarker = map.addMarker(
+            MarkerOptions()
+                .position(poi.position)
+                .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_ORANGE))
+                .draggable(true)
+                .title("Faites glisser pour repositionner")
+                .anchor(0.5f, 1f)
+                .zIndex(11f)
+        )
+        dragMarker?.showInfoWindow()
+
+        Log.d("MapManager", "Drag démarré pour POI ${poi.id} à ${poi.position}")
+        return dragMarker
+    }
+
+    /**
+     * Appelé en continu pendant le drag (onMarkerDrag) pour déplacer
+     * le cercle fantôme en temps réel et donner un retour visuel immédiat.
+     *
+     * @param nouvellePosition  Position courante du marker pendant le glissement
+     */
+    fun mettreAJourDragGhost(nouvellePosition: LatLng) {
+        dragGhostCircle?.center = nouvellePosition
+    }
+
+    /**
+     * Valide le déplacement : déplace le cercle d'origine à la nouvelle position
+     * et nettoie les éléments temporaires de drag.
+     *
+     * La sauvegarde Firestore est gérée par MainActivity (via poiRepository).
+     *
+     * @param nouvellePosition  Position finale confirmée par l'utilisateur
+     */
+    fun validerDrag(nouvellePosition: LatLng) {
+        val poiId = poiEnDeplacement ?: return
+
+        // Déplacer le cercle d'origine à la nouvelle position et le rendre visible
+        poiCircles[poiId]?.apply {
+            center    = nouvellePosition
+            isVisible = true
+        }
+
+        nettoyerDrag()
+        Log.d("MapManager", "Drag validé pour POI $poiId → $nouvellePosition")
+    }
+
+    /**
+     * Annule le drag : remet le cercle d'origine à sa position initiale
+     * et nettoie les éléments temporaires.
+     */
+    fun annulerDrag() {
+        val poiId = poiEnDeplacement ?: return
+
+        // Remettre le cercle d'origine visible (il n'a pas bougé, seul le marker a bougé)
+        poiCircles[poiId]?.isVisible = true
+
+        nettoyerDrag()
+        Log.d("MapManager", "Drag annulé pour POI $poiId")
+    }
+
+    /**
+     * Annule silencieusement le drag si un drag est en cours.
+     * Appelé avant tout rafraîchissement ou nettoyage de carte.
+     */
+    private fun annulerDragSiEnCours() {
+        if (poiEnDeplacement != null) annulerDrag()
+    }
+
+    /** Libère les ressources du drag (marker temporaire + cercle fantôme). */
+    private fun nettoyerDrag() {
+        dragMarker?.remove()
+        dragMarker = null
+        dragGhostCircle?.remove()
+        dragGhostCircle = null
+        poiEnDeplacement    = null
+        positionOrigineDrag = null
+    }
+
+    // -------------------------------------------------------------------------
+    // Suppression d'un cercle (après lecture)
+    // -------------------------------------------------------------------------
 
     /** Supprime visuellement un cercle de POI (après lecture). */
     fun supprimerCerclePoi(poiId: String) {

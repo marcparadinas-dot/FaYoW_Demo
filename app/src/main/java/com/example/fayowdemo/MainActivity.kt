@@ -40,6 +40,11 @@ import com.google.android.gms.location.*
 import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.OnMapReadyCallback
 import com.google.android.gms.maps.SupportMapFragment
+import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.Marker
+import android.view.GestureDetector
+import android.view.MotionEvent
+import androidx.core.view.GestureDetectorCompat
 
 @RequiresApi(Build.VERSION_CODES.CUPCAKE)
 class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListener {
@@ -252,13 +257,9 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         bm.registerReceiver(poiLuReceiver,        IntentFilter(LocationService.ACTION_POI_LU))
         bm.registerReceiver(syncEtatReceiver,     IntentFilter(LocationService.ACTION_SYNC_ETAT))
 
-        // Si la carte est déjà prête (retour de veille), signaler au service
-        // que MainActivity est à nouveau active
         if (::mMap.isInitialized) {
             bm.sendBroadcast(Intent(LocationService.ACTION_MAIN_STARTED))
         }
-        // Si la carte n'est pas encore prête, ACTION_MAIN_STARTED sera envoyé
-        // depuis onMapReady au premier lancement
     }
 
     override fun onStop() {
@@ -463,14 +464,13 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                 .build()
         }
 
-        // locationCallback nullable → recréé si nécessaire
         if (locationCallback == null) {
             locationCallback = object : LocationCallback() {
                 override fun onLocationResult(locationResult: LocationResult) {
                     val location = locationResult.lastLocation ?: return
                     currentLocation = location
-                    // En mode Parcourir, on met à jour currentLocation mais on
-                    // ne déplace pas le marqueur (absent) ni la caméra
+                    // En mode Parcourir, on mémorise la position mais sans
+                    // déplacer le marqueur ni recentrer la caméra
                     if (!isModeParcourir && ::mMap.isInitialized) {
                         mapManager.updateLocationMarker(mMap, location, currentAzimuth)
                     }
@@ -492,8 +492,15 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         mMap = googleMap
         mapManager.initialiserCarte(mMap)
 
-        // Listener de clic par défaut (mode normal) : uniquement les INITIATED
+        // Listener de clic par défaut (mode normal)
         installerListenerClicModeNormal()
+
+        // Listener de clic long (actif dans les deux modes pour les cercles INITIATED)
+        installerListenerClicLong()
+
+        // Listeners de drag du marker (actifs en permanence, mais le drag
+        // ne peut démarrer que via installerListenerClicLong)
+        installerListenersDragMarker()
 
         if (!permissionManager.hasFineLocationPermission()) {
             permissionManager.demanderPermissions()
@@ -513,8 +520,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
         startLocationUpdates()
 
-        // Envoie ACTION_MAIN_STARTED avec retries pour absorber la race condition
-        // entre onMapReady et le démarrage effectif de LocationService
         val bm = LocalBroadcastManager.getInstance(this)
         val mainStartedIntent = Intent(LocationService.ACTION_MAIN_STARTED)
         bm.sendBroadcast(mainStartedIntent)
@@ -564,6 +569,160 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     }
 
     // =========================================================================
+    // Drag & Drop — listeners installés une seule fois sur la carte
+    // =========================================================================
+
+    /**
+     * Clic long sur un cercle INITIATED → démarre le drag.
+     * Actif dans les deux modes (normal et Parcourir).
+     *
+     * setOnCircleLongClickListener est absent/buggé dans le SDK Maps Android
+     * malgré la dépendance 18.x. On passe par un GestureDetector sur la MapView :
+     * au onLongPress, on projette les coordonnées pixel → LatLng, puis on cherche
+     * le POI INITIATED le plus proche dans un rayon de tolérance (~40px).
+     */
+    private fun installerListenerClicLong() {
+        val mapFragment = supportFragmentManager.findFragmentById(R.id.map) as? SupportMapFragment
+        val mapView = mapFragment?.view ?: return
+
+        val gestureDetector = GestureDetectorCompat(
+            this,
+            object : GestureDetector.SimpleOnGestureListener() {
+                override fun onLongPress(e: MotionEvent) {
+                    // Convertir les coordonnées pixel du toucher en LatLng sur la carte
+                    val touchLatLng = mMap.projection.fromScreenLocation(
+                        android.graphics.Point(e.x.toInt(), e.y.toInt())
+                    )
+
+                    // Chercher le POI INITIATED le plus proche du point touché
+                    val uid = authManager.getCurrentUser()?.uid
+                    val poiCible = pointsInteret
+                        .filter { it.status == PoiStatus.INITIATED && it.creatorUid == uid }
+                        .minByOrNull { poi ->
+                            // Distance en mètres entre le toucher et le centre du cercle
+                            val result = FloatArray(1)
+                            Location.distanceBetween(
+                                touchLatLng.latitude, touchLatLng.longitude,
+                                poi.position.latitude, poi.position.longitude,
+                                result
+                            )
+                            result[0]
+                        } ?: return
+
+                    // Vérifier que le toucher est bien dans le cercle (rayon 20m + marge tactile ~5m)
+                    val distResult = FloatArray(1)
+                    Location.distanceBetween(
+                        touchLatLng.latitude, touchLatLng.longitude,
+                        poiCible.position.latitude, poiCible.position.longitude,
+                        distResult
+                    )
+                    if (distResult[0] > 40f) return // Trop loin, ignorer
+
+                    // Démarrer le drag via MapManager
+                    mapManager.demarrerDragPoi(mMap, poiCible)
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Faites glisser pour repositionner",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        )
+
+        // Attacher le GestureDetector à la MapView en laissant passer tous les events
+        // (retourner false pour ne pas consommer l'event et laisser la carte fonctionner normalement)
+        mapView.setOnTouchListener { _, event ->
+            gestureDetector.onTouchEvent(event)
+            false
+        }
+    }
+
+    /**
+     * Listeners de drag sur le Marker temporaire.
+     * Installés une seule fois à l'initialisation de la carte.
+     *
+     * - onMarkerDrag      : met à jour le cercle fantôme en temps réel
+     * - onMarkerDragEnd   : propose la confirmation ou l'annulation
+     * - onMarkerDragStart : (optionnel) feedback visuel supplémentaire si besoin
+     */
+    private fun installerListenersDragMarker() {
+        mMap.setOnMarkerDragListener(object : GoogleMap.OnMarkerDragListener {
+
+            override fun onMarkerDragStart(marker: Marker) {
+                // Feedback supplémentaire possible ici si besoin
+            }
+
+            override fun onMarkerDrag(marker: Marker) {
+                // Déplacement en temps réel du cercle fantôme
+                if (mapManager.poiEnDeplacement != null) {
+                    mapManager.mettreAJourDragGhost(marker.position)
+                }
+            }
+
+            override fun onMarkerDragEnd(marker: Marker) {
+                val poiId = mapManager.poiEnDeplacement ?: return
+                val nouvellePosition = marker.position
+                afficherDialogConfirmationDeplacement(poiId, nouvellePosition)
+            }
+        })
+    }
+
+    // =========================================================================
+    // Confirmation du déplacement
+    // =========================================================================
+
+    /**
+     * Dialog affiché après le relâchement du marker draggable.
+     * Propose de valider ou d'annuler le déplacement.
+     *
+     * - Valider  → sauvegarde lat/lng dans Firestore + met à jour la liste locale
+     * - Annuler  → remet le cercle à sa position d'origine
+     */
+    private fun afficherDialogConfirmationDeplacement(poiId: String, nouvellePosition: LatLng) {
+        AlertDialog.Builder(this)
+            .setTitle("Confirmer le déplacement ?")
+            .setMessage(
+                "Nouvelle position :\n" +
+                        "Lat : %.6f\nLng : %.6f".format(nouvellePosition.latitude, nouvellePosition.longitude)
+            )
+            .setPositiveButton("Valider") { _, _ ->
+                // 1. Mettre à jour visuellement la carte
+                mapManager.validerDrag(nouvellePosition)
+
+                // 2. Mettre à jour la liste locale (pour que les rechargements soient cohérents)
+                val index = pointsInteret.indexOfFirst { it.id == poiId }
+                if (index != -1) {
+                    pointsInteret[index] = pointsInteret[index].copy(position = nouvellePosition)
+                }
+
+                // 3. Sauvegarder dans Firestore
+                poiRepository.mettreAJourPoi(
+                    poiId,
+                    mapOf(
+                        "lat" to nouvellePosition.latitude,
+                        "lng" to nouvellePosition.longitude
+                    ),
+                    onSuccess = {
+                        Toast.makeText(this, "Position mise à jour ✓", Toast.LENGTH_SHORT).show()
+                        Log.d("MainActivity", "Position POI $poiId sauvegardée dans Firestore")
+                    },
+                    onError = { e ->
+                        Toast.makeText(this, "Erreur sauvegarde : ${e.message}", Toast.LENGTH_SHORT).show()
+                        Log.e("MainActivity", "Erreur mise à jour position POI $poiId : ${e.message}")
+                        // En cas d'erreur Firestore, on recharge pour revenir à l'état cohérent
+                        chargerPointsInteret()
+                    }
+                )
+            }
+            .setNegativeButton("Annuler") { _, _ ->
+                // Remet le cercle à sa position d'origine
+                mapManager.annulerDrag()
+            }
+            .setCancelable(false) // Empêche de fermer le dialog sans choisir
+            .show()
+    }
+
+    // =========================================================================
     // Mode Parcourir
     // =========================================================================
 
@@ -588,8 +747,9 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             )
         )
 
-        // Installer le listener adapté au mode Parcourir
+        // Installer le listener de clic adapté au mode Parcourir
         installerListenerClicModeParcourir()
+        // Le listener de clic long (drag) reste actif — déjà installé en onMapReady
 
         // Mettre à jour le bouton
         findViewById<Button>(R.id.btnParcourir)?.text = getString(R.string.btn_retour)
@@ -621,6 +781,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
         // Restaurer le listener normal
         installerListenerClicModeNormal()
+        // Le listener de clic long (drag) reste actif — déjà installé en onMapReady
 
         // Mettre à jour le bouton
         findViewById<Button>(R.id.btnParcourir)?.text = getString(R.string.btn_parcourir)
@@ -737,10 +898,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
             .show()
     }
 
-    /**
-     * Envoie les IDs à réafficher au service et met à jour la carte locale.
-     * poisLusIds local est mis à jour pour que la carte reflète l'état correct.
-     */
     private fun envoyerReaffichageAuService(ids: Set<String>) {
         poisLusIds.removeAll(ids)
         pointsDejaDeclenches.removeAll(ids)
@@ -985,8 +1142,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                     override fun onLocationResult(locationResult: LocationResult) {
                         val location = locationResult.lastLocation ?: return
                         currentLocation = location
-                        // En mode Parcourir, on mémorise la position mais sans
-                        // déplacer le marqueur ni recentrer la caméra
                         if (!isModeParcourir && ::mMap.isInitialized) {
                             mapManager.updateLocationMarker(mMap, location, currentAzimuth)
                         }
