@@ -41,7 +41,9 @@ import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.OnMapReadyCallback
 import com.google.android.gms.maps.SupportMapFragment
 import com.google.android.gms.maps.model.LatLng
-import com.google.android.gms.maps.model.Marker
+import android.view.GestureDetector
+import android.view.MotionEvent
+import androidx.core.view.GestureDetectorCompat
 
 @RequiresApi(Build.VERSION_CODES.CUPCAKE)
 class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListener {
@@ -492,12 +494,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         // Listener de clic par défaut (mode normal)
         installerListenerClicModeNormal()
 
-        // Listener de clic long (actif dans les deux modes pour les cercles INITIATED)
-        installerListenerClicLong()
-
-        // Listeners de drag du marker (actifs en permanence, mais le drag
-        // ne peut démarrer que via installerListenerClicLong)
-        installerListenersDragMarker()
+        // Clic long + drag continu via GestureDetector sur la MapView
+        installerGestureDrag()
 
         if (!permissionManager.hasFineLocationPermission()) {
             permissionManager.demanderPermissions()
@@ -569,85 +567,118 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     // Drag & Drop — listeners installés une seule fois sur la carte
     // =========================================================================
 
+    // =========================================================================
+    // Drag & Drop continu — GestureDetector sur la MapView
+    // =========================================================================
+
     /**
-     * Clic long sur un cercle INITIATED → démarre le drag.
-     * Actif dans les deux modes (normal et Parcourir).
+     * Gère le drag continu d'un POI INITIATED sans relâcher le doigt.
      *
-     * On utilise setOnMapLongClickListener (API native et fiable) :
-     * Maps nous donne directement le LatLng du point pressé longtemps.
-     * On projette ensuite chaque centre de POI en pixels écran et on mesure
-     * la distance en pixels pour trouver le cercle touché — indépendant du zoom.
+     * Fonctionnement :
+     * - Un GestureDetector détecte le onLongPress → identifie le cercle INITIATED
+     *   le plus proche en pixels, active le mode drag
+     * - Le setOnTouchListener intercepte ensuite ACTION_MOVE (déplace le cercle
+     *   fantôme en temps réel) et ACTION_UP (affiche le dialog de confirmation)
+     * - Pendant le drag, le scroll de la carte est désactivé pour éviter les
+     *   conflits de geste
+     *
+     * Le GestureDetector doit recevoir TOUS les events via onTouchListener pour
+     * que onLongPress soit déclenché. On retourne false sauf pendant le drag
+     * (où on retourne true pour capturer les MOVE/UP suivants).
      */
-    private fun installerListenerClicLong() {
-        mMap.setOnMapLongClickListener { touchLatLng ->
-
-            val uid = authManager.getCurrentUser()?.uid
-
-            // Projeter le point touché en pixels écran
-            val touchPoint = mMap.projection.toScreenLocation(touchLatLng)
-
-            // Seuil de détection en pixels (rayon tactile confortable)
-            val seuilPixels = 80
-
-            // Chercher le POI INITIATED de l'utilisateur dont le centre
-            // projeté en pixels est le plus proche du toucher
-            val poiCible = pointsInteret
-                .filter { it.status == PoiStatus.INITIATED && it.creatorUid == uid }
-                .minByOrNull { poi ->
-                    val centrePixels = mMap.projection.toScreenLocation(poi.position)
-                    val dx = (touchPoint.x - centrePixels.x).toDouble()
-                    val dy = (touchPoint.y - centrePixels.y).toDouble()
-                    Math.sqrt(dx * dx + dy * dy)
-                } ?: return@setOnMapLongClickListener
-
-            // Vérifier que le centre projeté est bien dans le seuil
-            val centrePixels = mMap.projection.toScreenLocation(poiCible.position)
-            val dx = (touchPoint.x - centrePixels.x).toDouble()
-            val dy = (touchPoint.y - centrePixels.y).toDouble()
-            val distPixels = Math.sqrt(dx * dx + dy * dy)
-
-            if (distPixels > seuilPixels) return@setOnMapLongClickListener
-
-            Log.d("MainActivity", "Clic long sur POI ${poiCible.id} (dist: ${"%.1f".format(distPixels)}px)")
-
-            // Démarrer le drag via MapManager
-            mapManager.demarrerDragPoi(mMap, poiCible)
-            Toast.makeText(
-                this,
-                "Faites glisser pour repositionner",
-                Toast.LENGTH_SHORT
-            ).show()
+    @SuppressLint("ClickableViewAccessibility")
+    private fun installerGestureDrag() {
+        val mapFragment = supportFragmentManager.findFragmentById(R.id.map) as? SupportMapFragment
+        val mapView = mapFragment?.view ?: run {
+            Log.e("MainActivity", "MapView introuvable pour le gesture drag")
+            return
         }
-    }
 
-    /**
-     * Listeners de drag sur le Marker temporaire.
-     * Installés une seule fois à l'initialisation de la carte.
-     *
-     * - onMarkerDrag      : met à jour le cercle fantôme en temps réel
-     * - onMarkerDragEnd   : propose la confirmation ou l'annulation
-     * - onMarkerDragStart : (optionnel) feedback visuel supplémentaire si besoin
-     */
-    private fun installerListenersDragMarker() {
-        mMap.setOnMarkerDragListener(object : GoogleMap.OnMarkerDragListener {
+        // Flag interne : true quand un drag de POI est en cours
+        var dragActif = false
 
-            override fun onMarkerDragStart(marker: Marker) {
-                // Feedback supplémentaire possible ici si besoin
-            }
+        val gestureDetector = GestureDetectorCompat(
+            this,
+            object : GestureDetector.SimpleOnGestureListener() {
 
-            override fun onMarkerDrag(marker: Marker) {
-                // Déplacement en temps réel du cercle fantôme
-                if (mapManager.poiEnDeplacement != null) {
-                    mapManager.mettreAJourDragGhost(marker.position)
+                override fun onLongPress(e: MotionEvent) {
+                    val uid = authManager.getCurrentUser()?.uid ?: return
+
+                    // Projeter le point touché en pixels écran
+                    val touchPt = android.graphics.Point(e.x.toInt(), e.y.toInt())
+                    val seuilPx = 120 // zone de détection généreuse autour du cercle
+
+                    // Chercher le POI INITIATED de l'utilisateur le plus proche en pixels
+                    val poiCible = pointsInteret
+                        .filter { it.status == PoiStatus.INITIATED && it.creatorUid == uid }
+                        .minByOrNull { poi ->
+                            val c = mMap.projection.toScreenLocation(poi.position)
+                            val dx = (touchPt.x - c.x).toDouble()
+                            val dy = (touchPt.y - c.y).toDouble()
+                            Math.sqrt(dx * dx + dy * dy)
+                        } ?: return
+
+                    // Vérifier que le toucher est bien dans la zone de détection
+                    val centre = mMap.projection.toScreenLocation(poiCible.position)
+                    val dx = (touchPt.x - centre.x).toDouble()
+                    val dy = (touchPt.y - centre.y).toDouble()
+                    if (Math.sqrt(dx * dx + dy * dy) > seuilPx) return
+
+                    Log.d("MainActivity", "Drag démarré sur POI ${poiCible.id}")
+
+                    // Désactiver le scroll de la carte pendant le drag
+                    mMap.uiSettings.isScrollGesturesEnabled = false
+
+                    // Démarrer le drag visuel dans MapManager (pas de Marker, juste le cercle fantôme)
+                    mapManager.demarrerDragPoi(mMap, poiCible)
+                    dragActif = true
+
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Faites glisser sans relâcher",
+                        Toast.LENGTH_SHORT
+                    ).show()
                 }
             }
+        )
 
-            override fun onMarkerDragEnd(marker: Marker) {
-                val poiId = mapManager.poiEnDeplacement ?: return
-                val nouvellePosition = marker.position
-                afficherDialogConfirmationDeplacement(poiId, nouvellePosition)
+        mapView.setOnTouchListener { _, event ->
+            // Toujours alimenter le GestureDetector pour qu'il détecte onLongPress
+            gestureDetector.onTouchEvent(event)
+
+            if (dragActif) {
+                when (event.action) {
+                    MotionEvent.ACTION_MOVE -> {
+                        // Déplacer le cercle fantôme en temps réel
+                        val pt = android.graphics.Point(event.x.toInt(), event.y.toInt())
+                        val nouvellePos = mMap.projection.fromScreenLocation(pt)
+                        mapManager.mettreAJourDragGhost(nouvellePos)
+                        true // Capturer l'event pour éviter le scroll de la carte
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        // Réactiver le scroll de la carte
+                        mMap.uiSettings.isScrollGesturesEnabled = true
+                        dragActif = false
+
+                        val poiId = mapManager.poiEnDeplacement
+
+                        if (event.action == MotionEvent.ACTION_UP && poiId != null) {
+                            // Récupérer la position finale du cercle fantôme
+                            val pt = android.graphics.Point(event.x.toInt(), event.y.toInt())
+                            val positionFinale = mMap.projection.fromScreenLocation(pt)
+                            afficherDialogConfirmationDeplacement(poiId, positionFinale)
+                        } else {
+                            // ACTION_CANCEL : annuler proprement
+                            mapManager.annulerDrag()
+                        }
+                        true
+                    }
+                    else -> false
+                }
+            } else {
+                false // Pas de drag en cours → laisser Maps gérer normalement
             }
-        })
+        }
     }
 
     // =========================================================================

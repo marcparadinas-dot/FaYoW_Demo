@@ -34,8 +34,9 @@ class MapManager(private val context: Context) {
     // -------------------------------------------------------------------------
 
     /**
-     * Marqueur draggable temporaire créé lors d'un clic long sur un cercle INITIATED.
-     * Null quand aucun drag n'est en cours.
+     * Marqueur draggable temporaire — non utilisé dans cette implémentation
+     * (le drag est géré directement via le onTouchListener dans MainActivity).
+     * Conservé pour compatibilité future.
      */
     private var dragMarker: Marker? = null
 
@@ -118,8 +119,8 @@ class MapManager(private val context: Context) {
                     Color.argb(60, 190, 30, 250)
                 )
                 PoiStatus.PROPOSED  -> Pair(
-                    Color.argb(180, 97, 97, 97),
-                    Color.argb(100, 158, 158, 158),
+                    Color.argb(100, 76, 175, 80),
+                    Color.argb(80, 76, 175, 80)
                 )
                 PoiStatus.INITIATED -> Pair(
                     Color.argb(150, 255, 152, 0),
@@ -268,16 +269,15 @@ class MapManager(private val context: Context) {
      * 1. Mémorise l'ID et la position d'origine
      * 2. Masque le cercle d'origine
      * 3. Crée un cercle fantôme semi-transparent à la même position
-     * 4. Crée un Marker draggable orange au-dessus
      *
-     * Appelé depuis MainActivity sur clic long d'un cercle INITIATED.
+     * Le déplacement du cercle fantôme est ensuite piloté en temps réel
+     * par mettreAJourDragGhost(), appelé depuis le onTouchListener de MainActivity.
      *
      * @param map  La carte Google Maps active
      * @param poi  Le POI à déplacer
-     * @return     Le Marker draggable créé (MainActivity y attache les listeners de drag)
      */
-    fun demarrerDragPoi(map: GoogleMap, poi: PointInteret): Marker? {
-        if (poi.status != PoiStatus.INITIATED) return null
+    fun demarrerDragPoi(map: GoogleMap, poi: PointInteret) {
+        if (poi.status != PoiStatus.INITIATED) return
 
         // Si un drag était déjà en cours sur un autre POI, l'annuler proprement
         annulerDragSiEnCours()
@@ -288,7 +288,7 @@ class MapManager(private val context: Context) {
         // Masquer le cercle d'origine pendant le drag
         poiCircles[poi.id]?.isVisible = false
 
-        // Cercle fantôme : montre la future position du POI pendant le glissement
+        // Cercle fantôme : représente visuellement la nouvelle position pendant le glissement
         dragGhostCircle = map.addCircle(
             CircleOptions()
                 .center(poi.position)
@@ -299,20 +299,7 @@ class MapManager(private val context: Context) {
                 .zIndex(10f)
         )
 
-        // Marqueur draggable — c'est lui que l'utilisateur fait glisser sur la carte
-        dragMarker = map.addMarker(
-            MarkerOptions()
-                .position(poi.position)
-                .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_ORANGE))
-                .draggable(true)
-                .title("Faites glisser pour repositionner")
-                .anchor(0.5f, 1f)
-                .zIndex(11f)
-        )
-        dragMarker?.showInfoWindow()
-
         Log.d("MapManager", "Drag démarré pour POI ${poi.id} à ${poi.position}")
-        return dragMarker
     }
 
     /**
@@ -368,7 +355,7 @@ class MapManager(private val context: Context) {
         if (poiEnDeplacement != null) annulerDrag()
     }
 
-    /** Libère les ressources du drag (marker temporaire + cercle fantôme). */
+    /** Libère les ressources du drag (cercle fantôme). */
     private fun nettoyerDrag() {
         dragMarker?.remove()
         dragMarker = null
