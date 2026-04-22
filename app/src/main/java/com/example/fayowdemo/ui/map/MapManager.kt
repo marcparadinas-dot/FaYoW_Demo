@@ -119,8 +119,8 @@ class MapManager(private val context: Context) {
                     Color.argb(60, 190, 30, 250)
                 )
                 PoiStatus.PROPOSED  -> Pair(
-                    Color.argb(180, 97, 97, 97),
-                    Color.argb(100, 158, 158, 158),
+                    Color.argb(100, 76, 175, 80),
+                    Color.argb(80, 76, 175, 80)
                 )
                 PoiStatus.INITIATED -> Pair(
                     Color.argb(150, 255, 152, 0),
