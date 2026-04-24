@@ -220,11 +220,11 @@ class MapManager(private val context: Context) {
                     true
                 )
 
-                // Gris : PROPOSED → cliquables pour modérateur, non cliquables sinon
+                // Gris : PROPOSED → cliquables pour tous (lecture utilisateur, modération modérateur)
                 poi.status == PoiStatus.PROPOSED -> Triple(
                     Color.argb(180, 97, 97, 97),
                     Color.argb(100, 158, 158, 158),
-                    isModerator
+                    true
                 )
 
                 // VALIDATED non lus pour utilisateur normal : absents
