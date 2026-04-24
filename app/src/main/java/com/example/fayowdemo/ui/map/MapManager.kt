@@ -293,8 +293,6 @@ class MapManager(private val context: Context) {
      * @param poi  Le POI à déplacer
      */
     fun demarrerDragPoi(map: GoogleMap, poi: PointInteret) {
-        // Drag autorisé sur INITIATED (propriétaire) et VALIDATED (modérateur)
-        if (poi.status == PoiStatus.PROPOSED) return
 
         // Si un drag était déjà en cours sur un autre POI, l'annuler proprement
         annulerDragSiEnCours()

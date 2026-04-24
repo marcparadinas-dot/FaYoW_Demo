@@ -539,14 +539,14 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
      * Mode Parcourir :
      * - Cercles verts (VALIDATED lus)      → dialog de lecture (texte, sans TTS)
      * - Cercles orange (INITIATED)         → dialog d'édition
+     * - Cercles gris (PROPOSED)            → dialog de lecture pour tous, modération pour modérateur
      * - Cercles violets (VALIDATED, modo)  → dialog de modération
-     * - Cercles gris (PROPOSED, modo)      → dialog de modération
      */
     private fun installerListenerClicModeParcourir() {
         mMap.setOnCircleClickListener { circle ->
             val poiId = circle.tag as? String ?: return@setOnCircleClickListener
 
-            // Cercle vert : POI lu → afficher le texte
+            // Cercle vert ou violet : POI VALIDATED → afficher le texte
             val messageLu = poisLusMessagesParcourir[poiId]
             if (messageLu != null) {
                 afficherDialogPoiLu(messageLu)
@@ -557,13 +557,23 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
             when {
                 // Cercle orange : POI INITIATED → édition brouillon
-                poi.status == PoiStatus.INITIATED -> showEditMyPoiDialog(poi)
+                poi.status == PoiStatus.INITIATED ->
+                    showEditMyPoiDialog(poi)
 
-                // Modérateur sur VALIDATED ou PROPOSED → modération
-                authManager.isModerator && (poi.status == PoiStatus.VALIDATED
-                        || poi.status == PoiStatus.PROPOSED) -> {
-                    showPoiEditDialog(PendingPoi(id = poi.id, message = poi.message))
+                // Cercle gris : POI PROPOSED
+                poi.status == PoiStatus.PROPOSED -> {
+                    if (authManager.isModerator) {
+                        // Modérateur → dialog de modération
+                        showPoiEditDialog(PendingPoi(id = poi.id, message = poi.message))
+                    } else {
+                        // Utilisateur → lecture seule
+                        afficherDialogPoiLu(poi.message)
+                    }
                 }
+
+                // Cercle violet : VALIDATED non lu, modérateur uniquement → modération
+                authManager.isModerator && poi.status == PoiStatus.VALIDATED ->
+                    showPoiEditDialog(PendingPoi(id = poi.id, message = poi.message))
             }
         }
     }
@@ -611,11 +621,12 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
                     // Candidats déplaçables selon le profil :
                     // - Utilisateur normal : ses POIs INITIATED
-                    // - Modérateur        : ses POIs INITIATED + tous les VALIDATED
+                    // - Modérateur        : ses POIs INITIATED + tous les VALIDATED + tous les PROPOSED
                     val candidats = if (authManager.isModerator) {
                         pointsInteret.filter {
                             (it.status == PoiStatus.INITIATED && it.creatorUid == uid)
                                     || it.status == PoiStatus.VALIDATED
+                                    || it.status == PoiStatus.PROPOSED
                         }
                     } else {
                         pointsInteret.filter {
@@ -651,6 +662,9 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
         // touchInterceptor reçoit les events via dispatchTouchEvent,
         // avant que Maps ne les consomme
+        // positionFinaleEnAttente : non null entre ACTION_UP et la décision du dialog
+        var positionFinaleEnAttente: LatLng? = null
+
         mapView.touchInterceptor = { event ->
             // Toujours alimenter le GestureDetector pour détecter onLongPress
             gestureDetector.onTouchEvent(event)
@@ -669,15 +683,21 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                         val poiId = mapManager.poiEnDeplacement
                         if (poiId != null) {
                             val pt = android.graphics.Point(event.x.toInt(), event.y.toInt())
-                            val posFinale = mMap.projection.fromScreenLocation(pt)
-                            afficherDialogConfirmationDeplacement(poiId, posFinale)
+                            positionFinaleEnAttente = mMap.projection.fromScreenLocation(pt)
+                            afficherDialogConfirmationDeplacement(poiId, positionFinaleEnAttente!!) {
+                                positionFinaleEnAttente = null
+                            }
                         }
                         true
                     }
                     MotionEvent.ACTION_CANCEL -> {
                         mMap.uiSettings.isScrollGesturesEnabled = true
                         dragActif = false
-                        mapManager.annulerDrag()
+                        // N'annuler le drag que si aucun dialog de confirmation n'est en attente
+                        // (le CANCEL peut venir du transfert de focus vers le dialog)
+                        if (positionFinaleEnAttente == null) {
+                            mapManager.annulerDrag()
+                        }
                         false
                     }
                     else -> true // Capturer tous les autres events pendant le drag
@@ -693,13 +713,20 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
     // =========================================================================
 
     /**
-     * Dialog affiché après le relâchement du marker draggable.
+     * Dialog affiché après le relâchement du doigt.
      * Propose de valider ou d'annuler le déplacement.
      *
      * - Valider  → sauvegarde lat/lng dans Firestore + met à jour la liste locale
      * - Annuler  → remet le cercle à sa position d'origine
+     *
+     * @param onTermine  Appelé dans tous les cas après la décision de l'utilisateur,
+     *                   pour signaler que le dialog est fermé (efface positionFinaleEnAttente).
      */
-    private fun afficherDialogConfirmationDeplacement(poiId: String, nouvellePosition: LatLng) {
+    private fun afficherDialogConfirmationDeplacement(
+        poiId: String,
+        nouvellePosition: LatLng,
+        onTermine: () -> Unit
+    ) {
         AlertDialog.Builder(this)
             .setTitle("Confirmer le déplacement ?")
             .setMessage(
@@ -707,10 +734,11 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                         "Lat : %.6f\nLng : %.6f".format(nouvellePosition.latitude, nouvellePosition.longitude)
             )
             .setPositiveButton("Valider") { _, _ ->
+                onTermine()
                 // 1. Mettre à jour visuellement la carte
                 mapManager.validerDrag(nouvellePosition)
 
-                // 2. Mettre à jour la liste locale (pour que les rechargements soient cohérents)
+                // 2. Mettre à jour la liste locale
                 val index = pointsInteret.indexOfFirst { it.id == poiId }
                 if (index != -1) {
                     pointsInteret[index] = pointsInteret[index].copy(position = nouvellePosition)
@@ -730,16 +758,16 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
                     onError = { e ->
                         Toast.makeText(this, "Erreur sauvegarde : ${e.message}", Toast.LENGTH_SHORT).show()
                         Log.e("MainActivity", "Erreur mise à jour position POI $poiId : ${e.message}")
-                        // En cas d'erreur Firestore, on recharge pour revenir à l'état cohérent
                         chargerPointsInteret()
                     }
                 )
             }
             .setNegativeButton("Annuler") { _, _ ->
+                onTermine()
                 // Remet le cercle à sa position d'origine
                 mapManager.annulerDrag()
             }
-            .setCancelable(false) // Empêche de fermer le dialog sans choisir
+            .setCancelable(false)
             .show()
     }
 
@@ -760,6 +788,15 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
         // Arrêter le suivi GPS → la caméra ne suivra plus l'utilisateur
         stopLocationUpdates()
 
+        // DIAGNOSTIC — à retirer après vérification
+        Log.d("PARCOURIR", "isModerator=${authManager.isModerator}")
+        Log.d("PARCOURIR", "pointsInteret total=${pointsInteret.size}")
+        Log.d("PARCOURIR", "  VALIDATED=${pointsInteret.count { it.status == PoiStatus.VALIDATED }}")
+        Log.d("PARCOURIR", "  INITIATED=${pointsInteret.count { it.status == PoiStatus.INITIATED }}")
+        Log.d("PARCOURIR", "  PROPOSED=${pointsInteret.count { it.status == PoiStatus.PROPOSED }}")
+        Log.d("PARCOURIR", "poisLusIds=${poisLusIds.size} : $poisLusIds")
+        Log.d("PARCOURIR", "VALIDATED non lus pour modo=${pointsInteret.count { it.status == PoiStatus.VALIDATED && !poisLusIds.contains(it.id) }}")
+
         // Afficher la carte Parcourir et récupérer les messages des POIs lus
         poisLusMessagesParcourir.clear()
         poisLusMessagesParcourir.putAll(
@@ -771,7 +808,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListene
 
         // Installer le listener de clic adapté au mode Parcourir
         installerListenerClicModeParcourir()
-        // Le listener de clic long (drag) reste actif — déjà installé en onMapReady
 
         // Mettre à jour le bouton
         findViewById<Button>(R.id.btnParcourir)?.text = getString(R.string.btn_retour)
